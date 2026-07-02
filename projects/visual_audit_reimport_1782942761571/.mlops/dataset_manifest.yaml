@@ -1,0 +1,53 @@
+contract: mlops-flow-v1
+projectId: support_ticket_classification
+projectVersion: 0.1.0
+generatedAt: 2026-07-01T08:52:50.988Z
+kind: dataset_manifest
+target: classe_final
+sources:
+  - id: tickets_csv
+    type: csv
+    label: CSV de tickets rotulados
+    sensitive: true
+    schemaHash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+    schema: {}
+    sensitiveFields:
+      - email
+      - documento
+      - telefone
+    descriptor:
+      path: data/tickets.csv
+      delimiter: ","
+      encoding: utf-8
+  - id: warehouse_sql
+    type: sql
+    label: Histórico SQL
+    sensitive: false
+    schemaHash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+    schema: {}
+    sensitiveFields: []
+    descriptor:
+      connectionRef: env:WAREHOUSE_DATABASE_URL
+      queryHash: 2852f89818eec1a48326bb6db1b7922ed66dedd75da4de68fe524daf8a772383
+      previewLimit: 50
+  - id: support_api
+    type: api
+    label: API externa de suporte
+    sensitive: false
+    schemaHash: 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+    schema: {}
+    sensitiveFields: []
+    descriptor:
+      method: GET
+      url:
+        protocol: "https:"
+        host: api.example.local
+        pathname: /tickets
+      headerRefs:
+        - Authorization
+      paginationMode: page
+      timeoutSeconds: 30
+      mocks:
+        - id: support_api_contract
+          description: Resposta sintética para preview e treino seguro sem rede externa.
+latestDatasetVersion: null

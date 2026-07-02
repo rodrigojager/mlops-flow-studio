@@ -1,0 +1,64 @@
+contract: mlops-flow-v1
+projectId: support_ticket_classification
+projectVersion: 0.1.0
+generatedAt: 2026-07-02T00:19:01.194Z
+kind: model_card
+activeModelId: linear_baseline
+bestModelId: linear_baseline
+intendedUse: Classificar tickets em 27 classes e expor versão, métricas,
+  evidências de promoção e logs de predição.
+limitations:
+  - Exemplo inicial não contém dados reais.
+  - Embeddings/BERT ficam opcionais por causa do limite de VRAM.
+monitoring:
+  - prediction_logs
+  - runtime_metrics
+  - drift_basic
+riskLevel: medium
+problem:
+  type: multiclass_classification
+  target: classe_final
+  classes:
+    - classe_01
+    - classe_02
+    - classe_03
+    - classe_04
+    - classe_05
+    - classe_06
+    - classe_07
+    - classe_08
+    - classe_09
+    - classe_10
+    - classe_11
+    - classe_12
+    - classe_13
+    - classe_14
+    - classe_15
+    - classe_16
+    - classe_17
+    - classe_18
+    - classe_19
+    - classe_20
+    - classe_21
+    - classe_22
+    - classe_23
+    - classe_24
+    - classe_25
+    - classe_26
+    - classe_27
+  classDependencies:
+    - child: classe_02
+      parent: classe_01
+      condition: classe_02 só é válida quando classe_01 foi escolhida na etapa ampla.
+metrics:
+  primary: f1_macro
+  secondary:
+    - accuracy
+    - f1_weighted
+    - precision_macro
+    - recall_macro
+    - latency_p95_ms
+sensitiveFields:
+  - email
+  - documento
+  - telefone

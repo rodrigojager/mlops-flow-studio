@@ -1,0 +1,2328 @@
+PLANO MESTRE — PLATAFORMA DE MACHINE LEARNING EM LOTE, MLOPS, CONTAINERS REIMPORTÁVEIS E MELHORIA CONTÍNUA
+
+Objetivo deste documento
+========================
+
+Criar uma especificação completa, em plaintext, para servir como prompt-base em outra janela ou para orientar uma implementação com Codex/outro agente.
+
+A ideia central é construir uma plataforma que permita criar, importar, treinar, testar, comparar, simular, versionar, empacotar e melhorar modelos de Machine Learning de maneira contínua. Cada solução/modelo/API deve poder virar um container independente, mas também deve poder ser reimportado pela plataforma, inspecionado, modificado, retreinado, simulado e exportado novamente como uma versão melhorada ou corrigida.
+
+A plataforma deve funcionar como uma espécie de "fábrica de modelos e APIs de inferência", com foco em:
+
+- ingestão de dados em lote;
+- ingestão por APIs externas;
+- ingestão por webscraping/navegação automatizada com Playwright quando necessário;
+- extração, limpeza e transformação de features;
+- treino de múltiplos algoritmos com os mesmos dados;
+- comparação prática por métricas e backtesting;
+- pipelines multi-etapas, inclusive híbridos, como BERT + Random Forest;
+- avaliação contínua;
+- retreino;
+- rastreabilidade;
+- versionamento de datasets, features, experimentos, modelos, containers e APIs;
+- empacotamento de cada API/modelo em container;
+- reimportação do container/projeto para melhoria futura;
+- exportação de versões corrigidas/melhoradas.
+
+
+Visão geral da plataforma
+=========================
+
+A plataforma deve permitir que o usuário crie um "projeto de ML" a partir de dados, regras e objetivos. Um projeto pode conter uma ou mais pipelines de treinamento, uma ou mais pipelines de inferência e várias versões de modelos.
+
+Exemplo de fluxo desejado:
+
+1. O usuário cria um projeto chamado "classificacao_chamados_suporte".
+2. O usuário define fontes de dados:
+   - banco SQL;
+   - arquivo CSV/parquet;
+   - API externa;
+   - scraping com Playwright;
+   - upload manual;
+   - dataset histórico já armazenado.
+3. A plataforma executa a ingestão.
+4. A plataforma salva o dado bruto em camada raw.
+5. A plataforma valida o schema e a qualidade dos dados.
+6. A plataforma transforma os dados para camada clean.
+7. A plataforma gera features tabulares, textuais ou multimodais.
+8. A plataforma executa vários experimentos:
+   - Random Forest;
+   - XGBoost;
+   - Logistic Regression;
+   - LightGBM, se desejado;
+   - modelo neural;
+   - BERT para texto;
+   - pipeline híbrido BERT embeddings + Random Forest/XGBoost;
+   - ensemble/stacking.
+9. A plataforma compara os modelos por métricas.
+10. A plataforma roda backtesting quando houver histórico temporal.
+11. A plataforma registra todos os experimentos.
+12. A plataforma escolhe o melhor candidato ou permite aprovação manual.
+13. A plataforma empacota a solução como API de inferência.
+14. A API vira container Docker.
+15. O container é publicado em registry.
+16. O container/API pode ser reimportado no futuro.
+17. A plataforma monitora performance, drift e logs.
+18. Quando houver novos dados, a plataforma retreina e propõe uma versão melhorada.
+19. A nova versão só substitui a anterior se passar em critérios objetivos.
+20. A plataforma mantém rollback e histórico completo.
+
+
+Princípio arquitetural principal
+================================
+
+A API de inferência não deve ser o centro pesado do sistema.
+
+A arquitetura correta deve separar:
+
+- API de controle;
+- API de inferência;
+- workers de ingestão;
+- workers de treino;
+- workers de backtesting;
+- workers de monitoramento;
+- registry de modelos;
+- registry de containers;
+- armazenamento de dados;
+- armazenamento de artefatos;
+- rastreamento de experimentos;
+- orquestração de pipelines.
+
+A API deve receber comandos, validar payloads, expor status e servir inferências. Trabalhos demorados devem rodar em jobs, filas ou orquestrador.
+
+Arquitetura conceitual:
+
+Usuário / Sistema externo
+        |
+        v
+Plataforma Web / CLI / API de controle
+        |
+        v
+FastAPI Control Plane
+        |
+        +--> Worker de ingestão
+        +--> Worker de features
+        +--> Worker de treino
+        +--> Worker de avaliação
+        +--> Worker de backtesting
+        +--> Worker de empacotamento
+        +--> Worker de monitoramento
+        |
+        v
+Armazenamento e rastreabilidade
+        |
+        +--> Postgres para metadados
+        +--> Object Storage para datasets/modelos/artefatos
+        +--> MLflow para experimentos e registry
+        +--> DVC ou lakeFS para versionamento de dados
+        +--> Docker Registry para imagens
+        +--> Prometheus/Grafana/Logs para observabilidade
+
+
+Componentes principais
+======================
+
+1. Control Plane
+----------------
+
+Responsável por coordenar projetos, datasets, experimentos, modelos, versões e containers.
+
+Pode ser implementado com:
+
+- FastAPI;
+- Postgres;
+- Redis/RabbitMQ;
+- Celery ou Prefect;
+- MLflow;
+- MinIO/S3;
+- Docker/BuildKit;
+- opcionalmente Kubernetes/Nomad no futuro.
+
+Endpoints conceituais:
+
+POST /projects
+GET  /projects
+GET  /projects/{project_id}
+
+POST /projects/{project_id}/sources
+POST /projects/{project_id}/ingest
+GET  /ingestion-runs/{run_id}
+
+POST /projects/{project_id}/features/build
+GET  /feature-runs/{run_id}
+
+POST /projects/{project_id}/experiments/run
+GET  /experiments/{experiment_id}
+GET  /projects/{project_id}/leaderboard
+
+POST /projects/{project_id}/backtests/run
+GET  /backtests/{backtest_id}
+
+GET  /models
+GET  /models/{model_name}/versions
+POST /models/{model_name}/versions/{version}/promote
+POST /models/{model_name}/versions/{version}/rollback
+
+POST /containers/build
+GET  /containers/{container_id}
+POST /containers/{container_id}/import
+POST /containers/{container_id}/export
+
+POST /predict/{model_name}
+GET  /monitoring/{model_name}/drift
+GET  /monitoring/{model_name}/performance
+
+
+2. Project Registry
+-------------------
+
+Cada projeto de ML deve ter uma definição declarativa.
+
+Exemplo:
+
+project.yaml
+
+project:
+  name: classificacao_chamados_suporte
+  type: classification
+  objective: classificar chamados de suporte por categoria e prioridade
+  target_column: categoria_final
+  problem_type: multiclass_classification
+  primary_metric: macro_f1
+  secondary_metrics:
+    - accuracy
+    - precision_macro
+    - recall_macro
+    - latency_p95_ms
+  approval_mode: manual_or_automatic
+  production_policy:
+    min_improvement_primary_metric: 0.02
+    max_latency_p95_ms: 200
+    require_backtest_pass: true
+    require_no_critical_data_quality_failures: true
+
+data_sources:
+  - name: historico_chamados_sql
+    type: postgres
+    connection_ref: secret:postgres_support_db
+    query: SELECT * FROM chamados WHERE created_at >= :start_date
+
+  - name: portal_terceiro_scraper
+    type: playwright
+    scraper_ref: scrapers/portal_terceiro.py
+
+features:
+  tabular:
+    - nome_cliente
+    - produto
+    - tempo_aberto_horas
+    - quantidade_interacoes
+  text:
+    - titulo
+    - descricao
+    - mensagens_iniciais
+  date:
+    - created_at
+
+models:
+  candidates:
+    - random_forest
+    - xgboost
+    - logistic_regression
+    - bert_text_classifier
+    - bert_embeddings_random_forest
+    - bert_embeddings_xgboost
+    - stacked_ensemble
+
+deployment:
+  api_type: fastapi
+  containerize: true
+  base_image: python:3.11-slim
+  expose_port: 8000
+
+
+3. Data Registry
+----------------
+
+Deve registrar todos os datasets.
+
+Tabela conceitual: datasets
+
+- id;
+- project_id;
+- dataset_name;
+- dataset_version;
+- layer: raw, clean, features, training, validation, test;
+- source_name;
+- storage_uri;
+- schema_hash;
+- row_count;
+- column_count;
+- created_at;
+- created_by;
+- parent_dataset_version;
+- data_quality_status;
+- tags.
+
+A plataforma deve sempre conseguir responder:
+
+- qual dado bruto originou este dataset limpo?
+- qual dataset limpo originou estas features?
+- quais features treinaram este modelo?
+- qual versão do modelo gerou esta predição?
+- qual container continha essa versão do modelo?
+
+
+4. Feature Registry
+-------------------
+
+As features precisam ser definidas e rastreadas.
+
+Exemplo:
+
+feature_set.yaml
+
+feature_set:
+  name: suporte_features_v1
+  project: classificacao_chamados_suporte
+  entity_id: chamado_id
+  timestamp_column: created_at
+
+features:
+  - name: titulo_len
+    type: numeric
+    source: titulo
+    transformation: length
+
+  - name: descricao_embedding_bert
+    type: vector
+    source: descricao
+    transformation: bert_embedding
+    model_ref: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+
+  - name: tempo_aberto_horas
+    type: numeric
+    source: created_at,resolved_at
+    transformation: hours_between
+
+  - name: cliente_tem_historico_reincidente
+    type: boolean
+    source: historico_chamados
+    transformation: count_previous_tickets_gt_threshold
+    threshold: 5
+
+Ponto crítico:
+
+As features usadas no treino precisam ser reproduzíveis na inferência.
+
+Se uma feature depende de dados futuros, ela deve ser rejeitada ou marcada como leakage.
+
+
+5. Experiment Engine
+--------------------
+
+O Experiment Engine roda múltiplos algoritmos com os mesmos dados, compara métricas e cria um leaderboard.
+
+Objetivo:
+
+- não escolher algoritmo apenas por teoria;
+- rodar alternativas reais;
+- medir desempenho;
+- medir custo;
+- medir latência;
+- medir robustez;
+- medir estabilidade temporal;
+- comparar resultados em backtesting.
+
+Exemplo de candidatos iniciais:
+
+Para classificação tabular:
+
+- Logistic Regression;
+- Random Forest;
+- XGBoost;
+- LightGBM;
+- CatBoost;
+- SVM, se dataset não for gigantesco;
+- MLP simples.
+
+Para regressão tabular:
+
+- Linear Regression/Ridge/Lasso;
+- Random Forest Regressor;
+- XGBoost Regressor;
+- LightGBM Regressor;
+- CatBoost Regressor;
+- ElasticNet.
+
+Para texto:
+
+- TF-IDF + Logistic Regression;
+- TF-IDF + Linear SVM;
+- BERT fine-tuned classifier;
+- embeddings BERT + Random Forest;
+- embeddings BERT + XGBoost;
+- embeddings BERT + Logistic Regression;
+- sentence-transformers + classificador tabular.
+
+Para pipelines híbridos:
+
+- texto -> BERT embeddings -> concatena com features tabulares -> XGBoost;
+- texto -> BERT embeddings -> concatena com histórico agregado -> Random Forest;
+- texto -> classificador BERT -> score semântico -> modelo tabular final;
+- modelo tabular + modelo textual -> stacking/ensemble;
+- modelo A prediz categoria geral -> modelo B prediz subcategoria;
+- modelo A detecta confiança baixa -> humano ou modelo maior.
+
+Exemplo de leaderboard:
+
+model_name                          macro_f1   accuracy   recall_macro   latency_p95_ms   cost_per_1k
+random_forest_v1                    0.74       0.82       0.71           45               baixo
+xgboost_v1                          0.78       0.84       0.76           32               baixo
+bert_text_classifier_v1             0.81       0.86       0.79           180              médio
+bert_embeddings_random_forest_v1    0.83       0.87       0.81           95               médio
+stacked_ensemble_v1                 0.84       0.88       0.82           210              alto
+
+A plataforma não deve promover automaticamente o maior score se ele violar requisitos de latência, custo, explicabilidade ou estabilidade.
+
+
+6. Model Registry
+-----------------
+
+Cada modelo deve ser versionado.
+
+Estados:
+
+- candidate;
+- staging;
+- production;
+- archived;
+- rejected;
+- shadow;
+- canary.
+
+Metadados:
+
+- model_name;
+- model_version;
+- project_id;
+- algorithm;
+- framework;
+- artifact_uri;
+- mlflow_run_id;
+- dataset_version;
+- feature_set_version;
+- code_version;
+- container_image;
+- metrics;
+- params;
+- created_at;
+- promoted_at;
+- promoted_by;
+- status;
+- explanation;
+- risk_notes.
+
+Exemplo:
+
+model_version:
+  model_name: classificacao_chamados
+  version: 12
+  algorithm: bert_embeddings_xgboost
+  status: staging
+  primary_metric:
+    macro_f1: 0.83
+  metrics:
+    accuracy: 0.87
+    recall_macro: 0.81
+    precision_macro: 0.84
+    latency_p95_ms: 95
+  dataset_version: dataset_2026_06_30_v3
+  feature_set_version: suporte_features_v5
+  artifact_uri: s3://ml-artifacts/models/classificacao_chamados/v12/
+  container_image: registry.local/classificacao_chamados:12
+
+
+7. Container Registry e Reimportação
+------------------------------------
+
+Cada API/modelo exportado deve virar um container, mas também precisa ser reimportável.
+
+Isso exige padronizar o formato do container.
+
+Um container exportado deve conter:
+
+/app
+  main.py
+  inference.py
+  model_loader.py
+  features.py
+  schemas.py
+  metadata/
+    project.yaml
+    model_card.yaml
+    training_manifest.yaml
+    feature_manifest.yaml
+    api_manifest.yaml
+    container_manifest.yaml
+  artifacts/
+    model.pkl ou model.onnx ou pytorch_model.bin
+    tokenizer/ se for BERT
+    vectorizer.pkl
+    encoders.pkl
+  tests/
+    sample_requests.json
+    expected_outputs.json
+  requirements.txt
+  Dockerfile
+
+O container deve expor pelo menos:
+
+GET  /health
+GET  /metadata
+GET  /model-card
+POST /predict
+POST /predict/batch
+
+O endpoint /metadata deve devolver algo assim:
+
+{
+  "platform_compatible": true,
+  "platform_spec_version": "1.0",
+  "project_name": "classificacao_chamados_suporte",
+  "model_name": "classificacao_chamados",
+  "model_version": 12,
+  "algorithm": "bert_embeddings_xgboost",
+  "feature_set_version": "suporte_features_v5",
+  "training_dataset_version": "dataset_2026_06_30_v3",
+  "input_schema": {...},
+  "output_schema": {...},
+  "artifact_manifest": {...},
+  "created_at": "2026-06-30T10:00:00Z"
+}
+
+Reimportação significa:
+
+1. A plataforma recebe uma imagem Docker, um tarball ou um repositório.
+2. Ela procura o container_manifest.yaml.
+3. Ela valida se a versão do contrato é compatível.
+4. Ela lê schemas, features e model_card.
+5. Ela registra o modelo no catálogo.
+6. Ela roda testes de smoke.
+7. Ela faz inferência em dados de amostra.
+8. Ela permite editar projeto/pipeline.
+9. Ela permite retreinar com novos dados.
+10. Ela gera uma nova versão/container.
+
+O container precisa ser ao mesmo tempo:
+
+- executável fora da plataforma;
+- rastreável dentro da plataforma;
+- reimportável para melhoria futura.
+
+
+8. API Manifest
+---------------
+
+Toda API exportada precisa ter um manifesto.
+
+api_manifest.yaml
+
+api:
+  name: classificacao_chamados_api
+  version: 12
+  framework: fastapi
+  endpoints:
+    - path: /health
+      method: GET
+      purpose: health_check
+
+    - path: /metadata
+      method: GET
+      purpose: metadata_export
+
+    - path: /predict
+      method: POST
+      purpose: single_prediction
+
+    - path: /predict/batch
+      method: POST
+      purpose: batch_prediction
+
+input_schema:
+  type: object
+  required:
+    - titulo
+    - descricao
+    - produto
+  properties:
+    titulo:
+      type: string
+    descricao:
+      type: string
+    produto:
+      type: string
+    tempo_aberto_horas:
+      type: number
+
+output_schema:
+  type: object
+  properties:
+    request_id:
+      type: string
+    model_name:
+      type: string
+    model_version:
+      type: integer
+    prediction:
+      type: string
+    confidence:
+      type: number
+    probabilities:
+      type: object
+
+runtime:
+  python_version: "3.11"
+  dependencies_file: requirements.txt
+  startup_command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+
+9. Training Manifest
+--------------------
+
+Toda versão treinada precisa ter um training_manifest.yaml.
+
+training:
+  run_id: train_20260630_001
+  project_name: classificacao_chamados_suporte
+  model_name: classificacao_chamados
+  model_version: 12
+  algorithm: bert_embeddings_xgboost
+  created_at: 2026-06-30T10:00:00Z
+
+data:
+  training_dataset_version: dataset_2026_06_30_v3
+  validation_dataset_version: dataset_2026_06_30_val_v3
+  test_dataset_version: dataset_2026_06_30_test_v3
+  row_count_train: 1200000
+  row_count_validation: 150000
+  row_count_test: 150000
+
+features:
+  feature_set_version: suporte_features_v5
+  feature_count: 386
+  text_embedding_model: paraphrase-multilingual-MiniLM-L12-v2
+
+metrics:
+  primary_metric: macro_f1
+  macro_f1: 0.83
+  accuracy: 0.87
+  precision_macro: 0.84
+  recall_macro: 0.81
+  latency_p95_ms: 95
+
+approval:
+  status: staging
+  promoted: false
+  reason: "Aguardando validação manual"
+
+
+10. Model Card
+--------------
+
+Cada modelo deve ter um model_card.yaml.
+
+model_card:
+  model_name: classificacao_chamados
+  version: 12
+  intended_use: classificar chamados de suporte em categorias internas
+  not_intended_use:
+    - decisões legais automatizadas
+    - avaliação de pessoas sem revisão humana
+  training_data_summary:
+    period: 2024-01-01 to 2026-06-30
+    row_count: 1200000
+    source: histórico interno de chamados
+  limitations:
+    - pode errar categorias raras
+    - pode ter menor performance em produtos novos
+    - depende da qualidade do texto fornecido
+  monitoring_required:
+    - drift de categorias
+    - distribuição de produtos
+    - confiança média
+    - taxa de revisão humana
+  owner: time_ml
+  risk_level: medium
+
+
+Fluxo detalhado de ingestão
+===========================
+
+A plataforma deve permitir ingestão de diferentes fontes.
+
+Tipos de fonte:
+
+1. Upload de arquivo
+   - CSV;
+   - JSON;
+   - Parquet;
+   - Excel;
+   - ZIP.
+
+2. Banco de dados
+   - Postgres;
+   - MySQL;
+   - SQL Server;
+   - SQLite;
+   - BigQuery;
+   - Snowflake.
+
+3. API externa
+   - REST;
+   - GraphQL;
+   - autenticação por token;
+   - paginação;
+   - rate limit;
+   - retries.
+
+4. Webscraping
+   - requests/BeautifulSoup para páginas simples;
+   - Playwright para páginas JS, login, navegação e interações;
+   - controle de sessão;
+   - extração de tabelas, cards e downloads.
+
+5. Mensageria/eventos
+   - Kafka;
+   - RabbitMQ;
+   - webhooks;
+   - arquivos depositados em bucket.
+
+Processo de ingestão:
+
+1. Criar ingestion_run.
+2. Ler configuração da fonte.
+3. Coletar dados.
+4. Salvar dado bruto.
+5. Registrar hash do payload.
+6. Registrar horário, origem, status e erros.
+7. Validar schema.
+8. Normalizar dados.
+9. Salvar dataset clean.
+10. Gerar relatório de qualidade.
+11. Liberar ou bloquear uso para treino.
+
+Tabela ingestion_runs:
+
+- id;
+- project_id;
+- source_name;
+- source_type;
+- status;
+- started_at;
+- finished_at;
+- raw_storage_uri;
+- clean_storage_uri;
+- row_count;
+- error_message;
+- schema_hash;
+- code_version;
+- scraper_version;
+- triggered_by.
+
+
+Camadas de dados
+================
+
+A plataforma deve manter uma organização parecida com data lake/lakehouse simplificado:
+
+data/
+  projects/
+    classificacao_chamados/
+      raw/
+        2026-06-30/
+          batch_001.parquet
+      clean/
+        dataset_2026_06_30_v1.parquet
+      features/
+        feature_set_v5/
+          features_2026_06_30.parquet
+      splits/
+        train.parquet
+        validation.parquet
+        test.parquet
+      backtests/
+        backtest_001/
+          results.parquet
+      predictions/
+        2026-06-30/
+          predictions.parquet
+
+Regras:
+
+- raw é imutável;
+- clean pode ser regenerado, mas deve ser versionado;
+- features devem ter versão;
+- splits de treino/teste devem ser salvos;
+- predictions devem guardar versão do modelo;
+- backtests devem guardar configuração e resultado.
+
+
+Validação de dados
+==================
+
+Antes do treino ou inferência, a plataforma deve validar dados.
+
+Validações mínimas:
+
+- colunas obrigatórias existem;
+- tipos estão corretos;
+- nulos dentro do limite aceitável;
+- cardinalidade de categorias está dentro do esperado;
+- datas estão dentro do intervalo esperado;
+- campos numéricos não possuem valores absurdos;
+- duplicatas estão dentro do limite;
+- distribuição não mudou drasticamente em relação ao dataset anterior;
+- target existe para treino supervisionado;
+- não há vazamento evidente de dados futuros.
+
+Exemplo de regras:
+
+data_quality_rules:
+  required_columns:
+    - chamado_id
+    - titulo
+    - descricao
+    - categoria_final
+    - created_at
+
+  not_null:
+    titulo:
+      max_null_pct: 0.01
+    descricao:
+      max_null_pct: 0.05
+    categoria_final:
+      max_null_pct: 0.00
+
+  accepted_values:
+    produto:
+      - produto_a
+      - produto_b
+      - produto_c
+
+  numeric_ranges:
+    tempo_aberto_horas:
+      min: 0
+      max: 8760
+
+  leakage_checks:
+    forbidden_columns:
+      - categoria_revisada_depois
+      - data_resolucao_futura
+      - feedback_final_pos_atendimento
+
+
+Feature engineering
+===================
+
+Tipos de features:
+
+1. Numéricas
+   - normalização;
+   - escala;
+   - bins;
+   - diferenças temporais;
+   - médias móveis;
+   - agregações históricas.
+
+2. Categóricas
+   - one-hot encoding;
+   - target encoding;
+   - frequency encoding;
+   - embeddings.
+
+3. Texto
+   - limpeza básica;
+   - TF-IDF;
+   - embeddings BERT/sentence-transformers;
+   - fine-tuning de BERT;
+   - classificação semântica.
+
+4. Temporais
+   - hora;
+   - dia da semana;
+   - mês;
+   - sazonalidade;
+   - janelas móveis;
+   - lag features.
+
+5. Históricas
+   - quantidade de eventos anteriores;
+   - taxa de sucesso anterior;
+   - média dos últimos N eventos;
+   - tendência;
+   - recorrência.
+
+6. Multimodais, futuramente
+   - imagem;
+   - áudio;
+   - documentos;
+   - logs;
+   - eventos.
+
+Regras importantes:
+
+- A função de feature de treino e inferência deve ser a mesma ou semanticamente equivalente.
+- Toda feature deve ter origem rastreável.
+- Features que dependem de futuro devem ser bloqueadas.
+- Features caras devem registrar custo e latência.
+- Features com embeddings devem registrar versão do modelo de embedding.
+- Features podem ser materializadas para treino e calculadas sob demanda para inferência.
+
+
+Treino com múltiplos algoritmos
+===============================
+
+A plataforma deve ter AutoML controlado, mas não necessariamente black-box.
+
+O usuário deve poder definir uma matriz de experimentos.
+
+Exemplo:
+
+experiment_plan.yaml
+
+experiment:
+  name: classificacao_chamados_experimento_001
+  project: classificacao_chamados_suporte
+  dataset_version: dataset_2026_06_30_v3
+  feature_set_version: suporte_features_v5
+  target: categoria_final
+  split_strategy: temporal
+  primary_metric: macro_f1
+
+candidates:
+  - name: logistic_regression_tfidf
+    type: sklearn_pipeline
+    steps:
+      - tfidf
+      - logistic_regression
+    params:
+      max_features: [20000, 50000]
+      C: [0.1, 1, 5]
+
+  - name: random_forest_tabular
+    type: sklearn
+    algorithm: random_forest_classifier
+    params:
+      n_estimators: [200, 500]
+      max_depth: [8, 16, null]
+      class_weight: [balanced]
+
+  - name: xgboost_tabular
+    type: xgboost
+    algorithm: xgb_classifier
+    params:
+      max_depth: [4, 8]
+      learning_rate: [0.03, 0.1]
+      n_estimators: [300, 800]
+
+  - name: bert_text_classifier
+    type: transformers
+    base_model: neuralmind/bert-base-portuguese-cased
+    params:
+      epochs: [2, 3]
+      batch_size: [16, 32]
+      learning_rate: [0.00002, 0.00005]
+
+  - name: bert_embeddings_random_forest
+    type: hybrid
+    steps:
+      - bert_embeddings
+      - concat_tabular_features
+      - random_forest_classifier
+
+  - name: bert_embeddings_xgboost
+    type: hybrid
+    steps:
+      - bert_embeddings
+      - concat_tabular_features
+      - xgboost_classifier
+
+  - name: stacked_ensemble
+    type: ensemble
+    base_models:
+      - xgboost_tabular
+      - bert_text_classifier
+      - logistic_regression_tfidf
+    meta_model: logistic_regression
+
+O Experiment Engine deve:
+
+1. Criar splits de treino/validação/teste.
+2. Rodar cada candidato.
+3. Fazer tuning básico.
+4. Registrar parâmetros.
+5. Registrar métricas.
+6. Registrar latência.
+7. Registrar custo computacional.
+8. Registrar tamanho do modelo.
+9. Registrar explicabilidade, quando disponível.
+10. Montar leaderboard.
+11. Escolher candidato ou pedir aprovação.
+
+
+Comparação prática entre algoritmos
+===================================
+
+A plataforma deve evitar escolhas puramente teóricas.
+
+Exemplo de problema:
+
+"Qual funciona melhor: Random Forest, XGBoost ou BERT?"
+
+Resposta correta da plataforma:
+
+"Depende dos dados, do alvo, do custo, da latência e da métrica de negócio. Vamos rodar todos com o mesmo dataset, mesmo split e mesma regra de avaliação."
+
+Critérios de comparação:
+
+- métrica primária;
+- métricas secundárias;
+- estabilidade por janela temporal;
+- estabilidade por segmento;
+- performance em classes raras;
+- matriz de confusão;
+- latência média;
+- latência p95/p99;
+- custo de treino;
+- custo de inferência;
+- tamanho do artefato;
+- facilidade de deploy;
+- explicabilidade;
+- robustez contra dados faltantes;
+- necessidade de GPU;
+- facilidade de retreino.
+
+Exemplo de regra de ranking:
+
+score_final =
+  0.45 * normalized_primary_metric
++ 0.20 * normalized_secondary_metric
++ 0.10 * stability_score
++ 0.10 * segment_fairness_score
++ 0.10 * latency_score
++ 0.05 * cost_score
+
+Mas a plataforma deve deixar o usuário customizar isso.
+
+Exemplo:
+
+ranking_policy:
+  primary_metric_weight: 0.50
+  secondary_metrics_weight: 0.20
+  latency_weight: 0.10
+  cost_weight: 0.05
+  stability_weight: 0.10
+  explainability_weight: 0.05
+  hard_constraints:
+    max_latency_p95_ms: 200
+    min_macro_f1: 0.75
+    max_model_size_mb: 2000
+
+
+Pipelines multi-etapas
+======================
+
+A plataforma deve permitir pipelines compostos, não apenas um único modelo.
+
+Exemplo 1: BERT + Random Forest
+
+Objetivo:
+- BERT entende semântica do texto.
+- Random Forest/XGBoost aproveita histórico tabular e milhões de classificações anteriores.
+- A combinação pode ser mais robusta que cada parte isolada.
+
+Pipeline:
+
+Entrada:
+  titulo
+  descricao
+  produto
+  histórico do cliente
+  tempo aberto
+  categoria anterior, se houver
+
+Etapa 1:
+  BERT ou sentence-transformer gera embedding do texto.
+
+Etapa 2:
+  O embedding é concatenado com features tabulares:
+    - produto;
+    - cliente;
+    - histórico;
+    - tempo;
+    - recorrência;
+    - estatísticas.
+
+Etapa 3:
+  Random Forest ou XGBoost classifica.
+
+Etapa 4:
+  Calibração de probabilidade.
+
+Etapa 5:
+  Regra de confiança:
+    - se confiança >= 0.85, classifica automaticamente;
+    - se 0.60 <= confiança < 0.85, envia para revisão;
+    - se confiança < 0.60, usa modelo alternativo ou humano.
+
+Representação:
+
+input_text -> BERT embeddings -> vector
+tabular_data -> feature engineering -> vector
+vector_text + vector_tabular -> XGBoost/RandomForest -> prediction
+
+Exemplo 2: Modelo cascata
+
+1. Modelo A classifica categoria ampla.
+2. Modelo B especializado classifica subcategoria.
+3. Modelo C estima prioridade.
+4. Modelo D estima tempo de resolução.
+
+Exemplo:
+
+chamado -> classificador_categoria
+        -> classificador_subcategoria_por_categoria
+        -> regressor_tempo_resolucao
+        -> classificador_prioridade
+
+Exemplo 3: Ensemble
+
+Vários modelos votam:
+
+- XGBoost;
+- BERT;
+- Logistic Regression TF-IDF.
+
+Combinação:
+
+- voto majoritário;
+- média das probabilidades;
+- meta-modelo treinado sobre as saídas;
+- regra de confiança.
+
+Exemplo:
+
+model_outputs:
+  xgboost:
+    categoria_a: 0.60
+    categoria_b: 0.30
+    categoria_c: 0.10
+
+  bert:
+    categoria_a: 0.72
+    categoria_b: 0.20
+    categoria_c: 0.08
+
+  tfidf_logreg:
+    categoria_a: 0.55
+    categoria_b: 0.35
+    categoria_c: 0.10
+
+ensemble:
+  categoria_a: 0.63
+
+Exemplo 4: Modelo com fallback
+
+1. Modelo leve tenta responder.
+2. Se confiança baixa, modelo mais caro entra.
+3. Se ainda for incerto, humano revisa.
+
+Fluxo:
+
+fast_model -> confidence check
+  if high_confidence:
+    return prediction
+  else:
+    expensive_model -> confidence check
+      if high_confidence:
+        return prediction
+      else:
+        send_to_human_review
+
+Esse fluxo é útil para equilibrar custo, velocidade e qualidade.
+
+
+Treino de pipelines híbridos
+============================
+
+Para pipelines híbridos, a plataforma precisa versionar cada componente.
+
+Exemplo:
+
+hybrid_pipeline:
+  name: bert_embeddings_xgboost
+  version: 3
+
+components:
+  - name: text_encoder
+    type: sentence_transformer
+    base_model: paraphrase-multilingual-MiniLM-L12-v2
+    version: 1
+    output: text_embedding_384
+
+  - name: tabular_feature_builder
+    type: python_function
+    version: suporte_features_v5
+    output: tabular_features_42
+
+  - name: final_classifier
+    type: xgboost_classifier
+    version: 7
+    input:
+      - text_embedding_384
+      - tabular_features_42
+    output: category_probabilities
+
+  - name: calibrator
+    type: probability_calibrator
+    version: 2
+
+O modelo final não é só um arquivo. É um pipeline de componentes.
+
+Por isso o artifact_manifest precisa registrar:
+
+- tokenizer;
+- modelo BERT;
+- função de embedding;
+- encoders categóricos;
+- scaler;
+- modelo final;
+- calibrador;
+- thresholds;
+- schema de entrada;
+- schema de saída.
+
+
+Backtesting
+===========
+
+Backtesting deve simular como o modelo teria performado no passado.
+
+Para dados temporais, não usar split aleatório simples.
+
+Estratégias:
+
+1. Holdout temporal
+   - treina em dados até uma data;
+   - testa em período posterior.
+
+2. Walk-forward validation
+   - treina em janeiro-março, testa abril;
+   - treina janeiro-abril, testa maio;
+   - treina janeiro-maio, testa junho.
+
+3. Rolling window
+   - treina últimos N meses;
+   - testa próximo mês;
+   - avança janela.
+
+Exemplo:
+
+backtest_config.yaml
+
+backtest:
+  name: churn_backtest_001
+  project: churn_prediction
+  strategy: walk_forward
+  train_window:
+    type: expanding
+    initial_train_until: 2025-12-31
+  test_windows:
+    frequency: monthly
+    start: 2026-01-01
+    end: 2026-06-30
+  metrics:
+    - f1
+    - precision
+    - recall
+    - roc_auc
+  segment_metrics:
+    - plan
+    - region
+    - acquisition_channel
+
+Resultado esperado:
+
+backtest_result:
+  windows:
+    - train_until: 2025-12-31
+      test_from: 2026-01-01
+      test_to: 2026-01-31
+      f1: 0.72
+      recall: 0.69
+
+    - train_until: 2026-01-31
+      test_from: 2026-02-01
+      test_to: 2026-02-28
+      f1: 0.74
+      recall: 0.70
+
+  aggregate:
+    mean_f1: 0.73
+    std_f1: 0.02
+    worst_month_f1: 0.69
+    best_month_f1: 0.76
+
+O backtesting deve ajudar a responder:
+
+- o modelo é estável no tempo?
+- funciona apenas em um mês específico?
+- piora em determinados segmentos?
+- é sensível à sazonalidade?
+- um modelo mais simples é mais robusto?
+
+
+Avaliação de classificação
+==========================
+
+Métricas:
+
+- accuracy;
+- precision;
+- recall;
+- F1;
+- macro F1;
+- weighted F1;
+- ROC-AUC;
+- PR-AUC;
+- matriz de confusão;
+- log loss;
+- balanced accuracy;
+- top-k accuracy para multiclass.
+
+Quando usar:
+
+- Dataset balanceado: accuracy pode servir, mas não sozinha.
+- Dataset desbalanceado: F1, macro F1, recall, precision, PR-AUC.
+- Custo alto para falso negativo: recall.
+- Custo alto para falso positivo: precision.
+- Multiclasse com classes raras: macro F1.
+- Probabilidades importantes: log loss e calibração.
+- Ranking de risco: ROC-AUC/PR-AUC.
+
+A plataforma deve exibir:
+
+- matriz de confusão geral;
+- matriz por segmento;
+- classes mais confundidas;
+- exemplos de erro;
+- score por threshold;
+- curva precision/recall;
+- curva ROC;
+- distribuição das probabilidades.
+
+
+Avaliação de regressão
+======================
+
+Métricas:
+
+- MAE;
+- RMSE;
+- MAPE;
+- SMAPE;
+- R²;
+- median absolute error;
+- residual analysis.
+
+Quando usar:
+
+- MAE: erro médio mais interpretável.
+- RMSE: penaliza erros grandes.
+- MAPE: cuidado quando valores reais são próximos de zero.
+- R²: explica variância, mas pode enganar sozinho.
+
+A plataforma deve exibir:
+
+- erro médio;
+- erro por segmento;
+- erro por faixa de valor;
+- distribuição dos resíduos;
+- outliers;
+- comparação real vs previsto;
+- performance temporal.
+
+
+Avaliação de ranking/recomendação
+=================================
+
+Métricas:
+
+- precision@k;
+- recall@k;
+- MAP;
+- NDCG;
+- hit rate;
+- MRR.
+
+Use quando o objetivo for ordenar itens, recomendar, ranquear riscos ou priorizar filas.
+
+
+Monitoramento
+=============
+
+Monitoramento deve cobrir quatro camadas:
+
+1. Infraestrutura
+   - CPU;
+   - RAM;
+   - GPU;
+   - disco;
+   - rede;
+   - tempo de resposta;
+   - taxa de erro.
+
+2. API
+   - requests por minuto;
+   - latência p50/p95/p99;
+   - status codes;
+   - timeouts;
+   - payload inválido;
+   - throughput.
+
+3. Dados
+   - schema drift;
+   - missing values;
+   - distribuição das features;
+   - cardinalidade;
+   - categorias novas;
+   - outliers.
+
+4. Modelo
+   - score médio;
+   - confiança média;
+   - distribuição das predições;
+   - taxa por classe;
+   - drift;
+   - performance real quando label chega;
+   - taxa de revisão humana;
+   - taxa de fallback.
+
+5. Negócio
+   - impacto real;
+   - custo;
+   - economia;
+   - conversão;
+   - churn;
+   - fraude capturada;
+   - tempo economizado.
+
+Tipos de drift:
+
+- data drift;
+- concept drift;
+- label drift;
+- prediction drift;
+- schema drift.
+
+Ações possíveis:
+
+- apenas alertar;
+- bloquear treino;
+- bloquear deploy;
+- disparar retreino;
+- rodar backtest;
+- mover modelo para shadow;
+- rollback;
+- pedir aprovação humana.
+
+
+Retreino contínuo
+=================
+
+A plataforma deve suportar retreino, mas com controle.
+
+Políticas de retreino:
+
+1. Retreino por agenda
+   - diário;
+   - semanal;
+   - mensal.
+
+2. Retreino por volume
+   - quando chegam N novos exemplos rotulados.
+
+3. Retreino por degradação
+   - F1 caiu mais de 5%;
+   - RMSE subiu mais de 10%;
+   - recall caiu abaixo do mínimo.
+
+4. Retreino por drift
+   - drift severo em features críticas.
+
+5. Retreino manual
+   - usuário clica em "treinar nova versão".
+
+Processo correto:
+
+1. Criar novo dataset versionado.
+2. Rodar validação.
+3. Rodar features.
+4. Treinar modelos candidatos.
+5. Comparar contra produção.
+6. Rodar backtesting.
+7. Rodar testes de inferência.
+8. Gerar relatório.
+9. Aprovar ou rejeitar.
+10. Se aprovado, promover como staging/canary/production.
+11. Se ruim, arquivar/rejeitar.
+12. Nunca sobrescrever produção sem histórico.
+
+
+Ciclo de melhoria contínua
+==========================
+
+A plataforma deve aprender com uso real.
+
+Fluxo:
+
+1. Modelo faz predição.
+2. Sistema registra input, features, modelo e output.
+3. Depois, label real chega.
+4. Plataforma compara predição vs real.
+5. Plataforma identifica erros.
+6. Plataforma agrupa erros por tipo.
+7. Plataforma mostra segmentos problemáticos.
+8. Plataforma propõe:
+   - novas features;
+   - retreino;
+   - ajuste de threshold;
+   - modelo alternativo;
+   - ensemble;
+   - limpeza de dados;
+   - coleta de mais exemplos de classes raras.
+9. Usuário aprova experimentos.
+10. Plataforma treina candidatos.
+11. Plataforma compara.
+12. Plataforma exporta versão melhorada.
+
+Exemplo:
+
+O modelo erra muito chamados da categoria "financeiro".
+A plataforma detecta:
+
+- baixa quantidade de exemplos financeiros;
+- textos ambíguos;
+- confusão com categoria "cobrança";
+- performance ruim apenas em clientes enterprise.
+
+A plataforma sugere:
+
+- agrupar novas labels;
+- treinar classificador especializado para financeiro;
+- usar BERT embeddings;
+- adicionar histórico de departamento;
+- pedir revisão humana para baixa confiança.
+
+
+Containerização
+===============
+
+Cada modelo/API exportado deve ter Dockerfile próprio.
+
+Exemplo:
+
+Dockerfile
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app/ ./app/
+COPY artifacts/ ./artifacts/
+COPY metadata/ ./metadata/
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+A imagem deve ser versionada:
+
+registry.local/classificacao_chamados:12
+registry.local/classificacao_chamados:12.1
+registry.local/classificacao_chamados:production
+registry.local/classificacao_chamados:staging
+
+Não usar apenas "latest" como referência operacional.
+
+
+Reimportação de containers
+==========================
+
+A plataforma deve permitir reimportar:
+
+- imagem Docker;
+- tarball;
+- repositório Git;
+- pacote zip;
+- pasta local.
+
+Ao importar:
+
+1. Extrair/inspecionar manifestos.
+2. Ler metadata.
+3. Validar compatibilidade.
+4. Rodar container em sandbox.
+5. Chamar /health.
+6. Chamar /metadata.
+7. Chamar /predict com exemplos.
+8. Verificar schema.
+9. Registrar modelo/container.
+10. Permitir edição do projeto.
+11. Permitir retreino.
+12. Permitir exportar uma versão nova.
+
+Se o container não seguir o padrão da plataforma:
+
+- tentar modo "black-box";
+- usar apenas /predict;
+- gerar wrapper;
+- criar manifesto manual;
+- registrar limitações.
+
+Modo black-box:
+
+A plataforma não conhece internamente o modelo, mas consegue:
+
+- enviar inputs;
+- receber outputs;
+- medir latência;
+- rodar backtesting;
+- comparar com outros modelos;
+- empacotar wrapper;
+- substituir por pipeline nativo no futuro.
+
+
+Sandbox para teste e simulação
+==============================
+
+Cada modelo/container deve poder rodar em sandbox.
+
+Sandbox deve permitir:
+
+- testar endpoints;
+- enviar payloads manuais;
+- rodar lote de amostras;
+- simular produção;
+- comparar versões lado a lado;
+- medir latência;
+- medir memória;
+- inspecionar logs;
+- validar schema;
+- rodar backtest;
+- rodar shadow prediction.
+
+Exemplo:
+
+Versão produção:
+  classificacao_chamados:v10
+
+Versão candidata:
+  classificacao_chamados:v12
+
+A plataforma roda as duas sobre o mesmo lote histórico:
+
+input_1 -> v10 -> categoria A, confiança 0.71
+input_1 -> v12 -> categoria B, confiança 0.83
+label real -> categoria B
+
+Resultado:
+  v12 acertou, v10 errou.
+
+A plataforma agrega isso para milhares/milhões de exemplos.
+
+
+Shadow, Canary e Rollback
+=========================
+
+A plataforma deve suportar estratégias de deploy.
+
+1. Shadow mode
+   - modelo novo recebe cópia dos dados;
+   - não afeta usuário;
+   - compara resultado com produção;
+   - ótimo para validação segura.
+
+2. Canary
+   - modelo novo atende pequena porcentagem real;
+   - exemplo: 5% do tráfego;
+   - se métricas ficarem boas, aumenta para 25%, 50%, 100%.
+
+3. Blue/Green
+   - duas versões completas;
+   - alterna tráfego entre elas;
+   - rollback rápido.
+
+4. Rollback
+   - voltar para versão anterior marcada como production;
+   - deve ser automático ou manual.
+
+
+Rastreabilidade de predições
+============================
+
+Cada predição precisa de request_id.
+
+Tabela prediction_logs:
+
+- request_id;
+- project_id;
+- model_name;
+- model_version;
+- container_image;
+- input_schema_version;
+- raw_input;
+- features;
+- prediction;
+- confidence;
+- probabilities;
+- threshold;
+- created_at;
+- latency_ms;
+- error;
+- actual_label;
+- actual_label_received_at;
+- user_feedback;
+- trace_id.
+
+Isso permite auditoria:
+
+"Por que o modelo classificou este chamado como financeiro?"
+
+Resposta possível:
+
+- modelo: classificacao_chamados v12;
+- container: registry.local/classificacao_chamados:12;
+- feature_set: suporte_features_v5;
+- dataset: dataset_2026_06_30_v3;
+- principais features:
+  - embedding textual próximo de exemplos financeiros;
+  - produto = cobrança;
+  - histórico do cliente com 12 chamados financeiros;
+- confiança: 0.87;
+- threshold: 0.75.
+
+
+Explicabilidade
+===============
+
+A plataforma deve fornecer explicabilidade quando possível.
+
+Para modelos tabulares:
+
+- feature importance;
+- permutation importance;
+- SHAP;
+- PDP/ICE, se necessário.
+
+Para texto:
+
+- exemplos semelhantes;
+- tokens/frases relevantes;
+- attention não deve ser vendida como explicação perfeita;
+- nearest neighbors no espaço de embedding;
+- exemplos históricos parecidos.
+
+Para ensembles:
+
+- contribuição de cada modelo;
+- probabilidade individual;
+- decisão final;
+- regra de combinação.
+
+Exemplo de explicação:
+
+prediction_explanation:
+  final_prediction: financeiro
+  confidence: 0.87
+  model_version: 12
+  contributors:
+    bert_semantic_model:
+      prediction: financeiro
+      confidence: 0.82
+    xgboost_historical_model:
+      prediction: financeiro
+      confidence: 0.89
+  top_tabular_features:
+    - historico_financeiro_cliente
+    - produto_cobranca
+    - quantidade_chamados_similares
+  similar_cases:
+    - chamado_id: 918273
+      label: financeiro
+      similarity: 0.91
+    - chamado_id: 812332
+      label: financeiro
+      similarity: 0.88
+
+
+Segurança e governança
+======================
+
+A plataforma precisa considerar:
+
+- segredos em vault ou variáveis seguras;
+- nunca salvar tokens em código;
+- logs sem PII desnecessária;
+- mascaramento de dados sensíveis;
+- criptografia em repouso, se aplicável;
+- controle de acesso por projeto;
+- permissões para promover modelos;
+- trilha de auditoria;
+- retenção de dados;
+- compatibilidade com LGPD;
+- consentimento e base legal quando necessário;
+- cuidado com scraping e termos de uso.
+
+Perfis de acesso:
+
+- admin;
+- ml_engineer;
+- data_engineer;
+- reviewer;
+- viewer;
+- api_consumer.
+
+Ações auditáveis:
+
+- criar projeto;
+- alterar fonte de dados;
+- rodar ingestão;
+- rodar treino;
+- promover modelo;
+- rollback;
+- importar container;
+- exportar container;
+- apagar dataset;
+- alterar threshold;
+- alterar regra de deploy.
+
+
+Estrutura sugerida de repositório da plataforma
+===============================================
+
+ml-platform/
+  apps/
+    control-api/
+      app/
+        main.py
+        routes/
+        services/
+        schemas/
+        repositories/
+      Dockerfile
+
+    worker/
+      jobs/
+        ingest/
+        features/
+        training/
+        evaluation/
+        backtesting/
+        monitoring/
+        packaging/
+      Dockerfile
+
+    web-ui/
+      src/
+      package.json
+
+  platform/
+    core/
+      projects/
+      datasets/
+      features/
+      experiments/
+      models/
+      containers/
+      monitoring/
+      security/
+
+    templates/
+      inference-api/
+        app/
+        metadata/
+        Dockerfile
+        requirements.txt
+
+      training-pipeline/
+        jobs/
+        configs/
+
+  infra/
+    docker-compose.yml
+    postgres/
+    minio/
+    mlflow/
+    redis/
+    prometheus/
+    grafana/
+
+  examples/
+    churn/
+    support_ticket_classification/
+    price_regression/
+
+  docs/
+    architecture.txt
+    api_contracts.txt
+    container_contract.txt
+
+
+Stack inicial recomendada
+=========================
+
+Para MVP:
+
+- Python 3.11;
+- FastAPI;
+- Pydantic;
+- SQLAlchemy;
+- Postgres;
+- Redis;
+- Celery ou Prefect;
+- MLflow;
+- MinIO/S3;
+- pandas;
+- scikit-learn;
+- XGBoost;
+- LightGBM opcional;
+- transformers;
+- sentence-transformers;
+- Playwright;
+- Docker;
+- Prometheus;
+- Grafana;
+- Evidently ou implementação própria inicial de drift.
+
+Para uma primeira versão, evite Kubernetes. Use docker-compose.
+Depois evolua para Kubernetes/Nomad se realmente precisar.
+
+
+MVP 1 — Plataforma local funcional
+==================================
+
+Objetivo:
+Criar uma primeira versão que já faz o ciclo completo para um projeto.
+
+Funcionalidades:
+
+1. Criar projeto.
+2. Registrar fonte de dados por CSV/API.
+3. Rodar ingestão.
+4. Criar dataset raw e clean.
+5. Gerar features tabulares simples.
+6. Treinar Random Forest, XGBoost e Logistic Regression.
+7. Comparar métricas.
+8. Registrar experimentos no MLflow.
+9. Promover melhor modelo manualmente.
+10. Criar API de inferência FastAPI.
+11. Empacotar em Docker.
+12. Rodar container local.
+13. Fazer predição.
+14. Registrar prediction_logs.
+15. Reimportar container pelo manifesto.
+16. Rodar backtest simples.
+
+Critério de sucesso:
+
+Com um dataset CSV, a plataforma precisa conseguir gerar uma API de inferência containerizada e versionada.
+
+
+MVP 2 — Texto e pipelines híbridos
+==================================
+
+Adicionar:
+
+1. TF-IDF + Logistic Regression.
+2. BERT embeddings + Random Forest.
+3. BERT embeddings + XGBoost.
+4. BERT fine-tuned classifier, se houver GPU ou volume adequado.
+5. Leaderboard comparando modelos tabulares, textuais e híbridos.
+6. Explicações por similaridade de embeddings.
+7. Exportação de pipeline híbrido como container.
+
+
+MVP 3 — Retreino e melhoria contínua
+====================================
+
+Adicionar:
+
+1. Recebimento de labels reais.
+2. Métricas online.
+3. Detecção simples de drift.
+4. Retreino por agenda ou gatilho.
+5. Comparação com produção.
+6. Shadow mode.
+7. Canary básico.
+8. Rollback.
+9. Relatório de melhoria.
+
+
+MVP 4 — Reimportação robusta
+============================
+
+Adicionar:
+
+1. Importar imagem Docker.
+2. Validar manifesto.
+3. Rodar sandbox.
+4. Testar endpoints.
+5. Registrar como black-box ou nativo.
+6. Permitir criar versão derivada.
+7. Gerar novo container.
+8. Comparar container antigo vs novo.
+
+
+MVP 5 — Interface visual
+========================
+
+Adicionar UI para:
+
+- projetos;
+- fontes de dados;
+- execuções;
+- datasets;
+- features;
+- experimentos;
+- leaderboard;
+- modelos;
+- versões;
+- containers;
+- logs;
+- backtests;
+- drift;
+- comparação de modelos;
+- aprovação de deploy;
+- reimportação;
+- sandbox de teste.
+
+Essa UI pode ser integrada futuramente a uma IDE/plataforma maior, mas o backend deve funcionar via API/CLI primeiro.
+
+
+Contratos importantes
+=====================
+
+Contrato de projeto:
+
+- define problema;
+- target;
+- métrica;
+- fontes;
+- features;
+- modelos candidatos;
+- política de aprovação;
+- política de deploy.
+
+Contrato de dataset:
+
+- versão;
+- origem;
+- schema;
+- qualidade;
+- storage_uri;
+- hash.
+
+Contrato de feature set:
+
+- features;
+- transformações;
+- versões;
+- dependências;
+- leakage checks.
+
+Contrato de experimento:
+
+- dataset;
+- features;
+- algoritmo;
+- parâmetros;
+- métricas;
+- artefatos.
+
+Contrato de modelo:
+
+- versão;
+- algoritmo;
+- artefatos;
+- métricas;
+- status;
+- container.
+
+Contrato de container:
+
+- endpoints;
+- schemas;
+- metadados;
+- manifestos;
+- compatibilidade.
+
+
+Cuidados críticos
+=================
+
+1. Não misturar treino pesado dentro do endpoint de inferência.
+2. Não sobrescrever modelo em produção.
+3. Não escolher modelo só por accuracy.
+4. Não usar split aleatório para problema temporal.
+5. Não permitir data leakage.
+6. Não perder versão do dataset.
+7. Não perder versão das features.
+8. Não perder versão do código.
+9. Não carregar pickle/modelo de origem não confiável sem sandbox.
+10. Não registrar PII desnecessária nos logs.
+11. Não promover automaticamente modelo que só melhorou offline.
+12. Não ignorar latência/custo.
+13. Não tratar BERT como sempre melhor.
+14. Não tratar Random Forest/XGBoost como sempre suficiente.
+15. Comparar na prática.
+16. Backtesting deve respeitar a ordem temporal.
+17. Retreino deve gerar candidato, não substituir produção direto.
+18. Toda predição precisa ser rastreável.
+19. Todo container exportado precisa ser reimportável.
+20. A plataforma deve ser útil mesmo com modelo black-box.
+
+
+Exemplo de fluxo completo
+=========================
+
+Cenário:
+Classificação de chamados de suporte.
+
+1. Criar projeto:
+
+POST /projects
+
+{
+  "name": "classificacao_chamados",
+  "problem_type": "multiclass_classification",
+  "target": "categoria_final",
+  "primary_metric": "macro_f1"
+}
+
+2. Registrar fonte:
+
+POST /projects/classificacao_chamados/sources
+
+{
+  "name": "historico_chamados",
+  "type": "postgres",
+  "query": "SELECT * FROM chamados"
+}
+
+3. Rodar ingestão:
+
+POST /projects/classificacao_chamados/ingest
+
+4. Plataforma salva:
+
+raw dataset:
+  raw/historico_chamados/2026-06-30.parquet
+
+clean dataset:
+  clean/classificacao_chamados/dataset_v1.parquet
+
+5. Gerar features:
+
+POST /projects/classificacao_chamados/features/build
+
+6. Rodar experimentos:
+
+POST /projects/classificacao_chamados/experiments/run
+
+{
+  "candidates": [
+    "random_forest",
+    "xgboost",
+    "tfidf_logistic_regression",
+    "bert_embeddings_random_forest",
+    "bert_embeddings_xgboost"
+  ]
+}
+
+7. Plataforma cria leaderboard:
+
+1. bert_embeddings_xgboost       macro_f1 0.84 latency 96ms
+2. bert_embeddings_random_forest macro_f1 0.82 latency 110ms
+3. xgboost_tabular               macro_f1 0.77 latency 30ms
+4. random_forest                 macro_f1 0.74 latency 45ms
+5. tfidf_logistic_regression     macro_f1 0.73 latency 25ms
+
+8. Rodar backtest:
+
+POST /projects/classificacao_chamados/backtests/run
+
+9. Aprovar modelo:
+
+POST /models/classificacao_chamados/versions/12/promote
+
+10. Exportar container:
+
+POST /containers/build
+
+{
+  "model_name": "classificacao_chamados",
+  "model_version": 12,
+  "tag": "registry.local/classificacao_chamados:12"
+}
+
+11. Rodar container:
+
+docker run -p 8000:8000 registry.local/classificacao_chamados:12
+
+12. Fazer inferência:
+
+POST /predict
+
+{
+  "titulo": "Erro na cobrança do plano premium",
+  "descricao": "Cliente relata cobrança duplicada...",
+  "produto": "assinatura_premium",
+  "tempo_aberto_horas": 2
+}
+
+Resposta:
+
+{
+  "request_id": "req_123",
+  "model_name": "classificacao_chamados",
+  "model_version": 12,
+  "prediction": "financeiro",
+  "confidence": 0.87
+}
+
+13. Label real chega:
+
+POST /predictions/req_123/actual
+
+{
+  "actual_label": "financeiro"
+}
+
+14. Plataforma atualiza performance online.
+
+15. Após novos dados, roda retreino.
+
+16. Nova versão candidata v13 aparece.
+
+17. Plataforma compara v12 vs v13.
+
+18. Se v13 for melhor e estável, promove.
+
+19. Se v13 for pior, arquiva.
+
+20. v12 continua production.
+
+
+Como o Codex/agente deve implementar
+====================================
+
+Instruções para agente de implementação:
+
+1. Comece pelo backend, não pela UI.
+2. Crie um docker-compose local com:
+   - Postgres;
+   - Redis;
+   - MLflow;
+   - MinIO;
+   - API;
+   - Worker.
+3. Crie schemas SQL iniciais:
+   - projects;
+   - data_sources;
+   - datasets;
+   - feature_sets;
+   - experiment_runs;
+   - model_versions;
+   - container_versions;
+   - prediction_logs;
+   - backtest_runs;
+   - monitoring_reports.
+4. Crie API FastAPI.
+5. Crie worker para jobs assíncronos.
+6. Crie template de projeto.
+7. Crie ingestão CSV primeiro.
+8. Depois API externa.
+9. Depois Playwright.
+10. Crie feature builder tabular.
+11. Crie trainer para Random Forest.
+12. Crie trainer para XGBoost.
+13. Crie trainer para Logistic Regression.
+14. Crie leaderboard.
+15. Integre MLflow.
+16. Crie promoção de modelo.
+17. Crie template de inferência.
+18. Crie Dockerfile para container exportado.
+19. Crie endpoint /metadata no container exportado.
+20. Crie reimportação por manifesto.
+21. Crie backtesting simples.
+22. Crie logs de predição.
+23. Crie comparação entre versões.
+24. Crie retreino controlado.
+25. Só depois crie interface visual.
+
+Não tentar fazer tudo de uma vez.
+A primeira entrega precisa provar o ciclo:
+
+CSV -> features -> 3 modelos -> leaderboard -> MLflow -> promover -> exportar container -> inferir -> logar -> reimportar.
+
+
+Resumo executivo
+================
+
+A plataforma será uma fábrica de modelos e APIs containerizadas.
+
+Ela deve transformar dados em modelos, modelos em APIs, APIs em containers e containers em artefatos reimportáveis e melhoráveis.
+
+A parte mais importante não é só treinar modelos. É criar o ciclo completo:
+
+ingestão -> validação -> features -> treino -> avaliação -> backtesting -> versionamento -> deploy -> inferência -> logs -> labels reais -> monitoramento -> retreino -> nova versão -> comparação -> promoção ou rejeição.
+
+Ela deve permitir testar na prática diferentes algoritmos com os mesmos dados:
+
+- Random Forest;
+- XGBoost;
+- Regressão/Logistic Regression;
+- modelos de regressão;
+- modelos de classificação;
+- BERT;
+- BERT embeddings + Random Forest;
+- BERT embeddings + XGBoost;
+- ensembles;
+- cascatas;
+- fallbacks.
+
+A plataforma deve medir desempenho real, não só escolher por teoria.
+
+Cada modelo/API deve poder:
+
+- ser treinado;
+- ser avaliado;
+- ser simulado;
+- ser versionado;
+- ser exportado como container;
+- ser executado independentemente;
+- ser reimportado;
+- ser modificado;
+- ser retreinado;
+- ser comparado;
+- ser melhorado;
+- ser republicado como nova versão.
+
+Frase-guia:
+
+"Não estamos criando apenas modelos de Machine Learning. Estamos criando uma plataforma de ciclo de vida completo para modelos, onde cada API de inferência é um artefato versionado, containerizado, auditável, reimportável e continuamente melhorável."

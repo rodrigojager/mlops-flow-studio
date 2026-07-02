@@ -1,0 +1,38 @@
+contract: mlops-flow-v1
+projectId: support_ticket_classification
+projectVersion: 0.1.0
+generatedAt: 2026-07-01T23:47:58.943Z
+kind: experiment_manifest
+latestTrainingRunId: null
+problemType: multiclass_classification
+primaryMetric: f1_macro
+secondaryMetrics:
+  - accuracy
+  - f1_weighted
+  - precision_macro
+  - recall_macro
+  - latency_p95_ms
+candidates:
+  - id: xgboost_candidate
+    label: XGBoost candidato
+    algorithm: xgboost
+    framework: xgboost
+    role: candidate
+    task: multiclass_classification
+    dependencies:
+      - xgboost>=2,<3
+    metrics: null
+  - id: linear_baseline
+    label: Baseline ativo
+    algorithm: logistic_regression
+    framework: scikit-learn
+    role: active
+    task: multiclass_classification
+    dependencies: []
+    metrics: null
+pythonBlocks:
+  - id: deterministic_decider
+    label: Decisor Python
+    entrypoint: run
+    networkPolicy: none
+    dependencies: []

@@ -1,0 +1,16 @@
+{
+  "name": "@mlops-flow-studio/control-api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1077.0",
+    "@mlops-flow-studio/codegen-inference-api": "file:../../packages/codegen-inference-api",
+    "@mlops-flow-studio/mlops-spec": "file:../../packages/mlops-spec",
+    "fastify": "^5.0.0",
+    "jszip": "^3.10.1",
+    "yaml": "^2.9.0"
+  }
+}

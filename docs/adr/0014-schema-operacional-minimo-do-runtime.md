@@ -1,0 +1,5 @@
+# Schema operacional mínimo do runtime
+
+Decidimos que o runtime gerado deve ter 12 tabelas mínimas: `ingestion_runs`, `dataset_versions`, `feature_set_versions`, `training_runs`, `model_versions`, `promotion_decisions`, `prediction_runs`, `prediction_rows`, `evaluation_runs`, `metric_snapshots`, `drift_runs` e `app_events`. Esse conjunto é necessário para cobrir observabilidade, avaliação, promoção, lineage de dados/features, prediction logs e histórico operacional no MVP.
+
+O primeiro incremento operacional semeia `training_runs`, `model_versions`, `promotion_decisions` e `metric_snapshots` a partir de `latest-training-result.json` durante o startup do runtime gerado. A operação é idempotente para não duplicar dados em reinícios. O endpoint `POST /evaluate` grava avaliações em `evaluation_runs` e snapshots de métricas em `metric_snapshots`. O endpoint `POST /backtest` grava comparações entre baseline e candidatos como avaliação operacional em `evaluation_runs` e também cria snapshot de métricas. O endpoint `POST /drift` grava alertas de drift em `drift_runs` e também cria snapshot de métricas.

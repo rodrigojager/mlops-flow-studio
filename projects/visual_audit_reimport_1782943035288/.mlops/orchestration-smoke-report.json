@@ -1,0 +1,41 @@
+{
+  "status": "ok",
+  "outDir": "generated/support-ticket-runtime",
+  "venvDir": ".mlops-studio/orchestration-smoke-venv",
+  "baseUrl": "http://127.0.0.1:55423",
+  "startedAt": "2026-07-01T21:43:24.478Z",
+  "finishedAt": "2026-07-01T21:43:44.214Z",
+  "commands": [
+    {
+      "command": "python -m venv C:\\Users\\Rodrigo\\Desktop\\Mlops Flow Studio\\Mlops Flow Studio\\.mlops-studio\\orchestration-smoke-venv",
+      "exitCode": 0,
+      "signal": null,
+      "durationMs": 3209.448,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "command": "C:\\Users\\Rodrigo\\Desktop\\Mlops Flow Studio\\Mlops Flow Studio\\.mlops-studio\\orchestration-smoke-venv\\Scripts\\python.exe C:\\Users\\Rodrigo\\Desktop\\Mlops Flow Studio\\Mlops Flow Studio\\generated\\support-ticket-runtime\\.mlops\\orchestration-smoke.py C:\\Users\\Rodrigo\\Desktop\\Mlops Flow Studio\\Mlops Flow Studio\\generated\\support-ticket-runtime http://127.0.0.1:55423",
+      "exitCode": 0,
+      "signal": null,
+      "durationMs": 16522.247,
+      "stdout": "{\"status\": \"ok\", \"baseUrl\": \"http://127.0.0.1:55423\", \"prefect\": {\"readinessProject\": \"support_ticket_classification\", \"retrainingStatus\": \"approved_pending_runner\"}, \"celery\": {\"readinessProject\": \"support_ticket_classification\", \"retrainingStatus\": \"approved_pending_runner\", \"taskCount\": 12}, \"requestCount\": 12, \"missing\": []}",
+      "stderr": ""
+    }
+  ],
+  "smoke": {
+    "status": "ok",
+    "baseUrl": "http://127.0.0.1:55423",
+    "prefect": {
+      "readinessProject": "support_ticket_classification",
+      "retrainingStatus": "approved_pending_runner"
+    },
+    "celery": {
+      "readinessProject": "support_ticket_classification",
+      "retrainingStatus": "approved_pending_runner",
+      "taskCount": 12
+    },
+    "requestCount": 12,
+    "missing": []
+  }
+}

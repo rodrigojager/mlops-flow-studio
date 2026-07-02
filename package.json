@@ -1,0 +1,30 @@
+{
+  "name": "mlops-flow-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "validate:example": "tsx packages/mlops-spec/src/cli.ts validate examples/support_ticket_classification",
+    "schema:project": "tsx packages/mlops-spec/src/cli.ts schema project",
+    "codegen:example": "tsx packages/codegen-inference-api/src/cli.ts --project examples/support_ticket_classification --out generated/support-ticket-runtime",
+    "dev:control-api": "tsx apps/control-api/src/server.ts",
+    "test:control-api": "tsx --test apps/control-api/src/server.test.ts",
+    "test:worker": "python -m unittest discover apps/worker/tests",
+    "audit:visual": "node tools/visual-audit.mjs",
+    "smoke:runtime:docker": "node tools/runtime-docker-smoke.mjs",
+    "smoke:orchestration": "node tools/orchestration-smoke.mjs",
+    "dev:mlops-ui": "npm --workspace @mlops-flow-studio/mlops-ui run dev",
+    "build:mlops-ui": "npm --workspace @mlops-flow-studio/mlops-ui run build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "playwright": "^1.61.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  }
+}

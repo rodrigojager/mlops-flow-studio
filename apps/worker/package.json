@@ -1,0 +1,9 @@
+{
+  "name": "@mlops-flow-studio/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "python -m unittest discover apps/worker/tests"
+  }
+}

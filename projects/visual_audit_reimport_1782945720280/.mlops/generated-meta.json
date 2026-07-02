@@ -1,0 +1,15 @@
+{
+  "generatedKind": "mlops-runtime",
+  "contract": "mlops-flow-v1",
+  "projectId": "support_ticket_classification",
+  "projectVersion": "0.1.0",
+  "projectHash": "0a78639f8b3f31b54bb6eff6945da8f924f2ea03bcbbb23317d1a0327b13ce46",
+  "pipelineHash": "ee36234ab26c768e8a719f72e20a577938f75233586ef2ee31c2158c1767ff0e",
+  "reimportPackage": ".mlops",
+  "generatedAt": "2026-07-01T22:01:00.242Z",
+  "sourceFiles": [
+    "project.yaml",
+    "pipeline.flow.json"
+  ],
+  "latestTrainingRunId": "train-1782860260-5ca87c26"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "@mlops-flow-studio/codegen-inference-api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@mlops-flow-studio/mlops-spec": "file:../mlops-spec",
+    "yaml": "^2.9.0"
+  }
+}
