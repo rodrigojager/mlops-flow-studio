@@ -56,6 +56,17 @@ npm run dev:control-api
 npm run dev:mlops-ui
 ```
 
+Launcher local no Windows:
+
+```powershell
+.\start-mlops-flow-studio.cmd
+```
+
+Portas locais padrão:
+
+- Control API: `http://127.0.0.1:3334`
+- UI: `http://127.0.0.1:5273`
+
 ## Principais recursos aproveitáveis
 
 1. Monorepo com separação entre `apps/`, `packages/`, `examples/`, `generated/`, `docs/` e `tools/`.

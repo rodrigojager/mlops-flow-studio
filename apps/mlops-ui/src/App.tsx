@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from "react";
 import {
   Background,
   Controls,
+  Handle,
   MarkerType,
   MiniMap,
   Position,
@@ -10,6 +11,8 @@ import {
   type Edge,
   type Node,
   type NodeMouseHandler,
+  type NodeProps,
+  type NodeTypes,
   type OnConnect,
   type OnEdgesDelete,
   type OnNodeDrag,
@@ -209,6 +212,11 @@ interface NodeExecutionState {
   updatedAt?: string;
 }
 
+interface FlowNodeData extends Record<string, unknown> {
+  label: ReactNode;
+  sublabel: string;
+}
+
 const nodeTypeOptions: Array<{ type: NodeType; label: string; icon: typeof Play }> = [
   { type: "input", label: "Entrada", icon: Play },
   { type: "data_source", label: "Fonte", icon: Database },
@@ -236,6 +244,21 @@ const tabs: Array<{ id: AppTab; label: string; icon: typeof Play }> = [
 ];
 
 const themeStorageKey = "mlops-flow-studio.theme";
+
+const flowNodeTypes: NodeTypes = {
+  pipelineNode: PipelineFlowNode,
+};
+
+function PipelineFlowNode({ data }: NodeProps) {
+  const nodeData = data as FlowNodeData;
+  return (
+    <>
+      <Handle type="target" position={Position.Left} className="flow-node-handle flow-node-handle-target" />
+      <div className="flow-node-content">{nodeData.label}</div>
+      <Handle type="source" position={Position.Right} className="flow-node-handle flow-node-handle-source" />
+    </>
+  );
+}
 
 function readStoredTheme(): ThemeMode {
   if (typeof window === "undefined") {
@@ -724,6 +747,7 @@ export default function App() {
       const executionClass = executionState ? `node-run-${executionState.status}` : "";
       return {
         id: node.id,
+        type: "pipelineNode",
         position: node.position ?? defaultNodePosition(index),
         data: {
           label: <FlowNodeLabel label={node.label || node.id} sublabel={node.type} state={executionState ?? null} />,
@@ -1893,6 +1917,7 @@ export default function App() {
             <ReactFlow
               nodes={flowNodes}
               edges={flowEdges}
+              nodeTypes={flowNodeTypes}
               onConnect={onConnect}
               onNodeClick={onNodeClick}
               onEdgeClick={onEdgeClick}

@@ -1,8 +1,8 @@
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$apiUrl = "http://127.0.0.1:3333"
-$uiUrl = "http://127.0.0.1:5173"
+$apiUrl = "http://127.0.0.1:3334"
+$uiUrl = "http://127.0.0.1:5273"
 
 function Get-PowerShellHost {
   $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
@@ -30,8 +30,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $root "node_modules"))) {
 
 $shell = Get-PowerShellHost
 
-$apiCommand = "Set-Location -LiteralPath '$root'; npm run dev:control-api"
-$uiCommand = "Set-Location -LiteralPath '$root'; npm run dev:mlops-ui"
+$apiCommand = "Set-Location -LiteralPath '$root'; `$env:PORT='3334'; npm run dev:control-api"
+$uiCommand = "Set-Location -LiteralPath '$root'; `$env:VITE_CONTROL_API_URL='http://127.0.0.1:3334'; npm run dev:mlops-ui"
 
 Start-Process -FilePath $shell -ArgumentList @("-NoProfile", "-NoExit", "-Command", $apiCommand) -WindowStyle Normal
 Start-Sleep -Seconds 2

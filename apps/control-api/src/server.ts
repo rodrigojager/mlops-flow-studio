@@ -11631,7 +11631,7 @@ function isMissingFileError(error: unknown): boolean {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const port = Number(process.env.PORT ?? 3333);
+  const port = Number(process.env.PORT ?? 3334);
   const host = process.env.HOST ?? "127.0.0.1";
   const app = buildApp({ logger: true });
   await app.listen({ port, host });

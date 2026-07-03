@@ -46,7 +46,7 @@ import type {
   RuntimeSmokeResult,
 } from "./types.ts";
 
-export const controlApiUrl = import.meta.env.VITE_CONTROL_API_URL ?? "http://127.0.0.1:3333";
+export const controlApiUrl = import.meta.env.VITE_CONTROL_API_URL ?? "http://127.0.0.1:3334";
 
 export interface TrainBaselineOptions {
   incremental?: boolean;
