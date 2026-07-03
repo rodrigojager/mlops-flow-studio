@@ -31,6 +31,7 @@ import {
   Gauge,
   History,
   Layers,
+  Moon,
   Network,
   Play,
   Plus,
@@ -39,6 +40,7 @@ import {
   Server,
   Settings,
   Split,
+  Sun,
   Table2,
   Terminal,
   Trash2,
@@ -153,6 +155,7 @@ import type {
 
 type AppTab = "project" | "pipeline" | "studio" | "artifacts" | "runtime" | "settings";
 type StatusKind = "idle" | "busy" | "ok" | "error";
+type ThemeMode = "light" | "dark";
 type MlflowStage = "None" | "Staging" | "Production" | "Archived";
 type NodeExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "skipped";
 type PromotionRuleOperator = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "between" | "contains" | "not_contains" | "improved_by" | "worse_by" | "delta_gte" | "delta_lte";
@@ -232,7 +235,21 @@ const tabs: Array<{ id: AppTab; label: string; icon: typeof Play }> = [
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
+const themeStorageKey = "mlops-flow-studio.theme";
+
+function readStoredTheme(): ThemeMode {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+  const value = window.localStorage.getItem(themeStorageKey);
+  if (value === "dark" || value === "light") {
+    return value;
+  }
+  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+}
+
 export default function App() {
+  const [theme, setTheme] = useState<ThemeMode>(() => readStoredTheme());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [loaded, setLoaded] = useState<LoadedProject | null>(null);
@@ -306,6 +323,10 @@ export default function App() {
   const [projectJsonDraft, setProjectJsonDraft] = useState("");
   const [pipelineJsonDraft, setPipelineJsonDraft] = useState("");
   const [status, setStatus] = useState<StatusState>({ kind: "idle", message: "Control API aguardando." });
+
+  useEffect(() => {
+    window.localStorage.setItem(themeStorageKey, theme);
+  }, [theme]);
 
   const selectedNode = useMemo(
     () => pipelineDraft?.nodes.find((node) => node.id === selectedNodeId) ?? null,
@@ -1791,7 +1812,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={theme}>
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">M</div>
@@ -1818,6 +1839,15 @@ export default function App() {
           </button>
         </div>
         <div className="topbar-actions">
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => setTheme((current) => (current === "dark" ? "light" : "dark"))}
+            title={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"}
+            aria-label={theme === "dark" ? "Usar tema claro" : "Usar tema escuro"}
+          >
+            {theme === "dark" ? <Sun size={16} aria-hidden="true" /> : <Moon size={16} aria-hidden="true" />}
+          </button>
           <button type="button" className="command-button" disabled={!projectDraft} onClick={() => void handleSave()}>
             <Save size={16} />
             Salvar

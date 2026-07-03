@@ -1,7 +1,30 @@
 :root {
+  --app-bg: #f4f5f2;
+  --panel-bg: #fbfcfa;
+  --surface-bg: #ffffff;
+  --surface-muted: #eef1ec;
+  --surface-soft: #f4f5f2;
+  --text-strong: #17211f;
+  --text: #263331;
+  --text-muted: #63736f;
+  --border: #d7ddd8;
+  --border-strong: #c4cdc8;
+  --accent: #0d5e52;
+  --accent-soft: #eef8f3;
+  --accent-contrast: #ffffff;
+  --danger: #9b2c2c;
+  --danger-soft: #fff7f7;
+  --warning: #795b1f;
+  --warning-soft: #fff7dd;
+  --info: #2563eb;
+  --info-soft: #eff6ff;
+  --success: #0d5e52;
+  --success-soft: #eef8f3;
+  --shadow: 0 8px 24px rgb(29 50 45 / 10%);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #17202a;
-  background: #eef1f5;
+  color: var(--text-strong);
+  background: var(--app-bg);
+  color-scheme: light;
   font-synthesis: none;
   text-rendering: geometricPrecision;
 }
@@ -14,6 +37,8 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  color: var(--text);
+  background: var(--app-bg);
 }
 
 button,
@@ -1405,6 +1430,316 @@ h2 {
 
 code {
   font-family: "Cascadia Mono", "Fira Code", Consolas, monospace;
+}
+
+[data-theme="dark"] {
+  --app-bg: #0f1413;
+  --panel-bg: #151b1a;
+  --surface-bg: #1b2321;
+  --surface-muted: #111817;
+  --surface-soft: #202927;
+  --text-strong: #edf5f1;
+  --text: #d8e3df;
+  --text-muted: #9cafaa;
+  --border: #2d3a37;
+  --border-strong: #465551;
+  --accent: #53c7af;
+  --accent-soft: #14342f;
+  --accent-contrast: #07100e;
+  --danger: #ff9d9d;
+  --danger-soft: #321d1d;
+  --warning: #e6c879;
+  --warning-soft: #342a15;
+  --info: #7dd3fc;
+  --info-soft: #102a37;
+  --success: #53c7af;
+  --success-soft: #14342f;
+  --shadow: 0 10px 28px rgb(0 0 0 / 28%);
+  color-scheme: dark;
+}
+
+[data-theme] {
+  color: var(--text);
+  background: var(--app-bg);
+}
+
+[data-theme] .topbar,
+[data-theme] .tabs,
+[data-theme] .palette,
+[data-theme] .inspector,
+[data-theme] .statusbar {
+  border-color: var(--border);
+  background: var(--panel-bg);
+  color: var(--text);
+}
+
+[data-theme] .workspace,
+[data-theme] .canvas-panel,
+[data-theme] .react-flow {
+  background: var(--app-bg);
+}
+
+[data-theme] .brand strong,
+[data-theme] h2,
+[data-theme] .flow-node-title-row strong,
+[data-theme] .metric strong,
+[data-theme] .kv dd,
+[data-theme] .rule-card-header strong,
+[data-theme] .node-execution-summary strong {
+  color: var(--text-strong);
+}
+
+[data-theme] .brand span,
+[data-theme] label,
+[data-theme] .tabs button,
+[data-theme] .muted,
+[data-theme] .kv dt,
+[data-theme] .metric span,
+[data-theme] .chips span,
+[data-theme] .flow-node-meta,
+[data-theme] .rule-card-header span,
+[data-theme] .history-row span,
+[data-theme] .job-row-header span,
+[data-theme] .job-event span,
+[data-theme] .node-execution-summary p,
+[data-theme] .dependency-row span,
+[data-theme] .snapshot-action-result span,
+[data-theme] .snapshot-artifact-row span,
+[data-theme] .leaderboard-row span,
+[data-theme] .evidence span {
+  color: var(--text-muted);
+}
+
+[data-theme] .brand-mark,
+[data-theme] .primary-button {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+[data-theme] .project-switcher select,
+[data-theme] .command-button,
+[data-theme] .icon-button,
+[data-theme] .mini-button,
+[data-theme] .mini-link,
+[data-theme] input,
+[data-theme] select,
+[data-theme] textarea,
+[data-theme] .palette button,
+[data-theme] .file-row,
+[data-theme] .list-row,
+[data-theme] section,
+[data-theme] .metric,
+[data-theme] .snapshot-action-result,
+[data-theme] .snapshot-artifact-row,
+[data-theme] .mock-source,
+[data-theme] .mock-card,
+[data-theme] .leaderboard-row,
+[data-theme] .evidence,
+[data-theme] .rule-card,
+[data-theme] .history-row,
+[data-theme] .job-row,
+[data-theme] .job-log,
+[data-theme] .job-event,
+[data-theme] .node-execution-summary,
+[data-theme] .node-execution-summary span,
+[data-theme] .node-execution-meta code,
+[data-theme] .dependency-row,
+[data-theme] .mlflow-section,
+[data-theme] .diagnostic,
+[data-theme] .docker-inspect pre,
+[data-theme] .result-box pre,
+[data-theme] .preview-view pre,
+[data-theme] .chips span {
+  border-color: var(--border);
+  background: var(--surface-bg);
+  color: var(--text);
+}
+
+[data-theme] .topbar .command-button,
+[data-theme] .topbar .icon-button,
+[data-theme] .project-switcher select {
+  border-color: var(--border-strong);
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+[data-theme] .command-button:hover:not(:disabled),
+[data-theme] .icon-button:hover:not(:disabled),
+[data-theme] .mini-button:hover:not(:disabled),
+[data-theme] .palette button:hover,
+[data-theme] .file-row:hover,
+[data-theme] .history-row:hover,
+[data-theme] .history-row.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+[data-theme] .tabs button.active,
+[data-theme] .flow-node.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+[data-theme] .flow-node,
+[data-theme] .react-flow__node.flow-node {
+  border-color: var(--border-strong);
+  background: var(--surface-bg);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+[data-theme] .flow-node.selected,
+[data-theme] .react-flow__node.flow-node.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent), var(--shadow);
+}
+
+[data-theme] .node-state-text,
+[data-theme] .node-execution-meta code {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+}
+
+[data-theme] .node-status-dot {
+  box-shadow: 0 0 0 2px var(--surface-muted);
+}
+
+[data-theme] .flow-node.node-run-queued,
+[data-theme] .node-run-queued,
+[data-theme] .job-row.queued,
+[data-theme] .job-event.warning,
+[data-theme] .diagnostic.warning,
+[data-theme] .dependency-row.missing,
+[data-theme] .snapshot-artifact-row.missing,
+[data-theme] .evidence.neutral {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+[data-theme] .flow-node.node-run-running,
+[data-theme] .node-run-running,
+[data-theme] .job-row.running,
+[data-theme] .diagnostic.info {
+  border-color: var(--info);
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+[data-theme] .flow-node.node-run-completed,
+[data-theme] .node-run-completed,
+[data-theme] .job-row.completed,
+[data-theme] .dependency-row.installed,
+[data-theme] .snapshot-artifact-row.available,
+[data-theme] .evidence.green {
+  border-color: var(--success);
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+[data-theme] .flow-node.node-run-failed,
+[data-theme] .node-run-failed,
+[data-theme] .job-row.failed,
+[data-theme] .job-event.error,
+[data-theme] .diagnostic.error,
+[data-theme] .dependency-row.error,
+[data-theme] .evidence.red,
+[data-theme] .mini-button.danger,
+[data-theme] .icon-button.danger {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+[data-theme] .flow-node.node-run-cancelled,
+[data-theme] .flow-node.node-run-skipped,
+[data-theme] .node-run-cancelled,
+[data-theme] .node-run-skipped,
+[data-theme] .job-row.cancelled,
+[data-theme] .node-execution-summary.cancelled,
+[data-theme] .node-execution-summary.skipped {
+  border-color: var(--border-strong);
+  background: var(--surface-soft);
+  color: var(--text-muted);
+}
+
+[data-theme] .node-execution-summary.queued {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+[data-theme] .node-execution-summary.running {
+  border-color: var(--info);
+  background: var(--info-soft);
+}
+
+[data-theme] .node-execution-summary.completed {
+  border-color: var(--success);
+  background: var(--success-soft);
+}
+
+[data-theme] .node-execution-summary.failed {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+[data-theme] .statusbar.ok {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+[data-theme] .statusbar.error {
+  background: var(--danger);
+  color: var(--danger-soft);
+}
+
+[data-theme] .statusbar.busy {
+  background: var(--info);
+  color: #ffffff;
+}
+
+[data-theme="dark"] .statusbar.busy {
+  color: #07100e;
+}
+
+[data-theme] .react-flow__controls-button,
+[data-theme] .react-flow__minimap {
+  border-color: var(--border);
+  background: var(--surface-bg);
+  color: var(--text);
+}
+
+[data-theme] .react-flow__controls-button:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+[data-theme] .react-flow__minimap-mask {
+  fill: color-mix(in srgb, var(--app-bg) 80%, transparent);
+}
+
+[data-theme] .react-flow__minimap-node {
+  fill: var(--accent);
+}
+
+[data-theme] .react-flow__edge.selected .react-flow__edge-path,
+[data-theme] .edge-executed .react-flow__edge-path {
+  stroke: var(--accent);
+}
+
+[data-theme] .edge-running .react-flow__edge-path {
+  stroke: var(--info);
+}
+
+[data-theme] .edge-failed .react-flow__edge-path {
+  stroke: var(--danger);
+}
+
+[data-theme] .edge-skipped .react-flow__edge-path {
+  stroke: var(--text-muted);
 }
 
 @keyframes nodeStatusPulse {
