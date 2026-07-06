@@ -8,6 +8,7 @@ const appRoot = realpathSync(fileURLToPath(new URL(".", import.meta.url)));
 
 export default defineConfig({
   root: appRoot,
+  base: "./",
   plugins: [react()],
   build: {
     outDir: resolve(appRoot, "dist"),

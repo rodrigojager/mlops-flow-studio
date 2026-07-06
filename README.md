@@ -15,6 +15,7 @@ Este workspace foi inicializado como ICM e já contém o primeiro incremento exe
 - [packages/mlops-spec](./packages/mlops-spec/CONTEXT.md): contratos Zod, catálogo de métricas e diagnósticos.
 - [packages/codegen-inference-api](./packages/codegen-inference-api/CONTEXT.md): gerador de runtime FastAPI autônomo.
 - [apps/control-api](./apps/control-api/CONTEXT.md): API local do Studio.
+- [apps/desktop](./apps/desktop/CONTEXT.md): shell Electron para abrir o Studio como app local.
 - [apps/mlops-ui](./apps/mlops-ui/CONTEXT.md): UI visual com canvas e inspector.
 - [apps/worker](./apps/worker/CONTEXT.md): worker Python para preview, sandbox de bloco e treino baseline.
 - [projects/support_ticket_classification](./projects/support_ticket_classification/CONTEXT.md): cópia de trabalho carregável no Studio.
@@ -54,6 +55,8 @@ npm run test:worker
 npm run build:mlops-ui
 npm run dev:control-api
 npm run dev:mlops-ui
+npm run dev:desktop
+npm run start:desktop
 ```
 
 Launcher local no Windows:
@@ -66,6 +69,15 @@ Portas locais padrão:
 
 - Control API: `http://127.0.0.1:3334`
 - UI: `http://127.0.0.1:5273`
+
+Desktop Electron:
+
+```powershell
+npm run dev:desktop      # desenvolvimento: Control API + Vite + Electron
+npm run start:desktop    # produção local: build da UI + Electron
+```
+
+O shell Electron mantém a Control API separada do runtime FastAPI gerado. Ele apenas inicia o Studio local e carrega a UI buildada ou o servidor Vite no modo desenvolvimento.
 
 ## Principais recursos aproveitáveis
 

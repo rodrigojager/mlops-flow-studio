@@ -1,0 +1,14 @@
+{
+  "name": "@mlops-flow-studio/desktop",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "main": "main.mjs",
+  "scripts": {
+    "dev": "node dev.mjs",
+    "start": "electron main.mjs"
+  },
+  "devDependencies": {
+    "electron": "^43.0.0"
+  }
+}

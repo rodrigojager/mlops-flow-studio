@@ -8,6 +8,7 @@
 | `CONTEXT.md` | Roteamento raiz para sessões LLM. |
 | `apps/CONTEXT.md` | Roteamento das aplicações executáveis do Studio. |
 | `apps/control-api/CONTEXT.md` | Roteamento da API local de controle. |
+| `apps/desktop/CONTEXT.md` | Roteamento do shell Electron desktop. |
 | `apps/mlops-ui/CONTEXT.md` | Roteamento da interface visual. |
 | `apps/worker/CONTEXT.md` | Roteamento do worker Python local. |
 | `packages/CONTEXT.md` | Roteamento dos pacotes compartilhados. |

@@ -32,7 +32,11 @@ mlops flow studio/
 ├── package-lock.json                   # lockfile npm gerado para a base atual
 ├── tsconfig.base.json                  # base TypeScript compartilhada
 ├── tsconfig.json                       # entrada de typecheck do monorepo
-├── apps/                               # aplicações: control-api, mlops-ui e worker
+├── apps/                               # aplicações: control-api, desktop, mlops-ui e worker
+│   ├── control-api/                    # API local de controle
+│   ├── desktop/                        # shell Electron local do Studio
+│   ├── mlops-ui/                       # UI visual React/Vite
+│   └── worker/                         # worker Python local
 ├── packages/                           # pacotes: mlops-spec e codegen-inference-api
 ├── projects/                           # projetos MLOps versionáveis de desenvolvimento local
 ├── examples/                           # exemplos executáveis de projetos MLOps

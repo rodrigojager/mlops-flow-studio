@@ -19,7 +19,10 @@
     "smoke:runtime:docker": "node tools/runtime-docker-smoke.mjs",
     "smoke:orchestration": "node tools/orchestration-smoke.mjs",
     "dev:mlops-ui": "npm --workspace @mlops-flow-studio/mlops-ui run dev",
-    "build:mlops-ui": "npm --workspace @mlops-flow-studio/mlops-ui run build"
+    "build:mlops-ui": "npm --workspace @mlops-flow-studio/mlops-ui run build",
+    "dev:desktop": "npm --workspace @mlops-flow-studio/desktop run dev",
+    "build:desktop": "npm run build:mlops-ui",
+    "start:desktop": "npm run build:desktop && npm --workspace @mlops-flow-studio/desktop run start"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
