@@ -40,6 +40,7 @@ control-api/
 | Checar GPU/CUDA local | `src/server.ts` | `../../docs/adr/0019-gpu-cuda-como-perfil-de-execucao-no-mvp.md`, `../../docs/local-environment.md` |
 | Alterar status/catálogo/registry MLflow | `src/server.ts` | `../../docs/adr/0027-mlflow-como-integracao-opcional-de-primeira-classe.md` |
 | Gerar runtime | `src/server.ts` | `../../packages/codegen-inference-api/CONTEXT.md` |
+| Alterar capacidades/providers de manifesto | `src/server.ts` | `../../packages/mlops-spec/CONTEXT.md` |
 | Validar manifestos canônicos do runtime | `src/server.ts` | `../../docs/adr/0073-manifestos-canonicos-no-pacote-mlops.md`, `../../docs/adr/0074-automacao-opcional-prefect-celery-no-runtime.md`, `../../docs/adr/0075-manifesto-canonico-de-fontes-de-dados.md` |
 | Reimportar runtime gerado, zip, Git, imagem Docker ou remoto black-box | `src/server.ts` | `../../docs/adr/0023-pacote-de-reimportacao-embarcado-na-saida.md`, `../../docs/adr/0032-exportacao-e-reimportacao-de-zip-gerado.md`, `../../docs/adr/0070-importacao-black-box-controlada-de-runtime-remoto.md`, `../../docs/adr/0071-importacao-controlada-de-repositorio-git.md`, `../../docs/adr/0072-importacao-controlada-de-imagem-docker.md`, `../../docs/adr/0076-importacao-estatica-de-git-sem-contrato-mlops.md`, `../../docs/adr/0077-probe-openapi-sandboxado-para-imagens-docker.md` |
 | Gerenciar Docker do runtime | `src/server.ts` | `../../packages/codegen-inference-api/CONTEXT.md` |
@@ -55,3 +56,7 @@ control-api/
 npm run dev:control-api
 npm run test:control-api
 ```
+
+## Capability Manifests
+
+Projetos novos e importações black-box devem preencher `RuntimeManifest.capabilities` e `RuntimeManifest.infrastructure` por inferência do DAG. Não assuma Qdrant, LLM, MLflow ou worker como dependências globais; eles só aparecem quando o projeto/nó declara provider ou capacidade.

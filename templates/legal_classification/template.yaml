@@ -1,0 +1,41 @@
+id: legal_classification
+name: Classificação Jurídica com IA Híbrida
+category: validation_case
+validationCase: true
+description: Template complexo usado para validar DAG com dados, modelos, embeddings opcionais, busca vetorial, decisão, regras, LLM opcional, registry, drift, retreino e rollback.
+instantiates:
+  project: ../../examples/legal_ai_classification/project.yaml
+  pipeline: ../../examples/legal_ai_classification/pipeline.flow.json
+principles:
+  - O domínio jurídico é exemplo de validação, não camada fixa da ferramenta.
+  - Qdrant só é infraestrutura quando um nó de retrieval/vector_index declara provider qdrant em modo container.
+  - LLM é nó opcional e pode atuar como classificador, fallback, extrator, explicador ou revisor, conforme o grafo.
+  - MLflow é provider opcional de registry/experimentos, não dependência obrigatória do runtime.
+capabilities:
+  - data_ingestion
+  - preprocessing
+  - feature_engineering
+  - embeddings
+  - retrieval
+  - model_training
+  - model_inference
+  - decision
+  - rules
+  - llm
+  - evaluation
+  - drift_monitoring
+  - retraining
+  - model_registry
+providers:
+  vector_store:
+    provider: qdrant
+    mode: container
+    required: false
+  llm:
+    provider: openai_compatible
+    mode: external
+    required: false
+  model_registry:
+    provider: internal
+    mode: embedded
+    required: false

@@ -10,8 +10,10 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "validate:example": "tsx packages/mlops-spec/src/cli.ts validate examples/support_ticket_classification",
+    "validate:legal-example": "tsx packages/mlops-spec/src/cli.ts validate examples/legal_ai_classification",
     "schema:project": "tsx packages/mlops-spec/src/cli.ts schema project",
     "codegen:example": "tsx packages/codegen-inference-api/src/cli.ts --project examples/support_ticket_classification --out generated/support-ticket-runtime",
+    "codegen:legal-example": "tsx packages/codegen-inference-api/src/cli.ts --project examples/legal_ai_classification --out generated/legal-classification-runtime",
     "dev:control-api": "tsx apps/control-api/src/server.ts",
     "test:control-api": "tsx --test apps/control-api/src/server.test.ts",
     "test:worker": "python -m unittest discover apps/worker/tests",

@@ -13,6 +13,8 @@ import {
   CONTRACT_VERSION,
   analyzeMLOpsProject,
   dataSourceJsonSchema,
+  inferRuntimeInfrastructure,
+  inferRuntimeManifestCapabilities,
   metricCatalog,
   mlopsProjectJsonSchema,
   parseMLOpsProject,
@@ -63,6 +65,10 @@ interface CreateProjectBody {
   problemType?: "binary_classification" | "multiclass_classification" | "regression";
   target?: string;
   classes?: string[];
+}
+
+interface DeleteProjectBody {
+  confirm?: boolean;
 }
 
 interface GenerateBody {
@@ -585,6 +591,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
     return createProject(workspaceRoot, request.body ?? {});
   });
 
+  app.delete<{ Params: ProjectParams; Body: DeleteProjectBody }>("/projects/:projectId", async (request) => {
+    return deleteProject(workspaceRoot, request.params.projectId, request.body ?? {});
+  });
+
   app.post<{ Body: ImportRuntimeBody }>("/projects/import-runtime", async (request) => {
     return importRuntimeProject(workspaceRoot, request.body ?? {});
   });
@@ -1008,6 +1018,23 @@ async function createProject(workspaceRoot: string, body: CreateProjectBody) {
     pipelinePath: `${toWorkspaceRelative(root, projectRoot)}/${parsedProject.pipelineRef}`,
     project: parsedProject,
     pipeline: parsedPipeline,
+  };
+}
+
+async function deleteProject(workspaceRoot: string, projectId: string, body: DeleteProjectBody) {
+  if (body.confirm !== true) {
+    throw new WorkspaceError("Exclusão de projeto exige confirm: true.", 400);
+  }
+  const id = normalizeProjectId(projectId, "projectId");
+  const root = normalizeWorkspaceRoot(workspaceRoot);
+  const projectRoot = safeResolve(root, `projects/${id}`);
+  if (!(await pathExists(projectRoot))) {
+    throw new WorkspaceError(`Projeto não encontrado: ${id}`, 404);
+  }
+  await rm(projectRoot, { recursive: true, force: true });
+  return {
+    status: "ok",
+    projectId: id,
   };
 }
 
@@ -1837,6 +1864,7 @@ function gitStaticBlackBoxRuntimeManifest(project: MLOpsProject, pipeline: Pipel
     activeModelId: activeModelId(pipeline),
     executionProfile: project.execution.profile,
     persistence: project.runtime.persistence,
+    ...runtimeManifestCapabilityFields(project, pipeline),
     endpoints: inspection.observedEndpoints,
   };
 }
@@ -5002,6 +5030,7 @@ function dockerImageBlackBoxRuntimeManifest(project: MLOpsProject, pipeline: Pip
     activeModelId: activeModelId(pipeline),
     executionProfile: project.execution.profile,
     persistence: project.runtime.persistence,
+    ...runtimeManifestCapabilityFields(project, pipeline),
     endpoints: uniqueObservedEndpoints(runtimeEndpoints && runtimeEndpoints.length ? runtimeEndpoints : dockerImageObservedEndpoints(inspect)),
   };
 }
@@ -5471,6 +5500,7 @@ function remoteBlackBoxRuntimeManifest(project: MLOpsProject, pipeline: Pipeline
     activeModelId: activeModelId(pipeline),
     executionProfile: project.execution.profile,
     persistence: project.runtime.persistence,
+    ...runtimeManifestCapabilityFields(project, pipeline),
     endpoints: endpoints.length ? endpoints : ["GET /health"],
   };
 }
@@ -5741,6 +5771,7 @@ function playwrightScrapeRuntimeManifest(project: MLOpsProject, pipeline: Pipeli
     activeModelId: activeModelId(pipeline),
     executionProfile: project.execution.profile,
     persistence: project.runtime.persistence,
+    ...runtimeManifestCapabilityFields(project, pipeline),
     endpoints: endpoints.length ? endpoints : ["GET /"],
   };
 }
@@ -6000,6 +6031,7 @@ function importedRuntimeManifest(project: MLOpsProject, pipeline: PipelineFlow):
     activeModelId: activeModelId(pipeline),
     executionProfile: project.execution.profile,
     persistence: project.runtime.persistence,
+    ...runtimeManifestCapabilityFields(project, pipeline),
     endpoints: requiredRuntimeEndpoints(),
   };
 }
@@ -6021,6 +6053,14 @@ function importedRuntimeGeneratedMeta(project: MLOpsProject, pipeline: PipelineF
 
 function stableHash(value: unknown): string {
   return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function runtimeManifestCapabilityFields(project: MLOpsProject, pipeline: PipelineFlow): Pick<RuntimeManifest, "capabilities" | "infrastructure"> {
+  const capabilities = inferRuntimeManifestCapabilities(pipeline, project);
+  return {
+    capabilities,
+    infrastructure: inferRuntimeInfrastructure(capabilities),
+  };
 }
 
 async function copyAppMetadataCustomCode(sourceDir: string, targetProjectRoot: string, pipeline: PipelineFlow): Promise<void> {
@@ -11293,6 +11333,7 @@ function starterProject(input: ReturnType<typeof normalizeCreateProjectInput>): 
       classes: input.problemType === "regression" ? [] : input.classes,
       classDependencies: [],
     },
+    domain: { kind: "generic" },
     execution: { profile: "cpu" },
     metrics: input.problemType === "regression" ? { primary: "rmse", secondary: ["mae", "r2", "latency_p95_ms"] } : { primary: "f1_macro", secondary: ["accuracy", "f1_weighted", "latency_p95_ms"] },
     dataSources: [
@@ -11379,6 +11420,7 @@ function starterProject(input: ReturnType<typeof normalizeCreateProjectInput>): 
       persistence: { primary: "postgres", databaseUrlRef: "env:DATABASE_URL" },
       dashboard: { enabled: true, pages: ["overview", "data", "models", "prediction", "monitoring", "events", "docs"], highlightedMetrics: input.problemType === "regression" ? ["rmse", "mae", "latency_p95_ms"] : ["f1_macro", "accuracy", "latency_p95_ms"] },
       mlflow: { enabled: false, trackingUriRef: "env:MLFLOW_TRACKING_URI", registryEnabled: false },
+      capabilities: { mode: "auto", providers: {} },
     },
     modelCard: {
       intendedUse: "Classificar entradas operacionais e expor evidências de versão, métricas e promoção.",

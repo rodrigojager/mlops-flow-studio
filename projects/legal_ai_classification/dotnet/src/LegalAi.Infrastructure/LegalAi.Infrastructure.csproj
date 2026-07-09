@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\LegalAi.Application\LegalAi.Application.csproj" />
+  </ItemGroup>
+</Project>

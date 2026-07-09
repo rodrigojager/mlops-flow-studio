@@ -3,6 +3,11 @@ name: Classificação de Tickets de Suporte
 version: 0.1.0
 contract: mlops-flow-v1
 description: Exemplo multiclasse com fontes CSV, SQL e API externa, modelos candidatos e decisor determinístico.
+template:
+  id: support_ticket_classification
+  category: starter
+  validationCase: false
+  source: templates/support_ticket_classification
 problem:
   type: multiclass_classification
   target: classe_final

@@ -55,6 +55,7 @@ import {
   backtestModels,
   cancelWorkerJob,
   createProject,
+  deleteProject,
   dockerRuntimeAction,
   evaluateModel,
   exportGeneratedArtifactZip,
@@ -269,6 +270,14 @@ function readStoredTheme(): ThemeMode {
     return value;
   }
   return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+}
+
+function isEditingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const tagName = target.tagName.toLowerCase();
+  return tagName === "input" || tagName === "textarea" || tagName === "select" || target.isContentEditable;
 }
 
 export default function App() {
@@ -860,6 +869,34 @@ export default function App() {
       await refreshProjects(true);
       setSelectedProjectId(result.project.id);
       setStatus({ kind: "ok", message: `${result.project.name} criado.` });
+    } catch (error) {
+      setStatus({ kind: "error", message: errorMessage(error) });
+    }
+  }
+
+  async function handleDeleteProject() {
+    if (!selectedProjectId) {
+      return;
+    }
+    const summary = projects.find((project) => project.id === selectedProjectId);
+    const label = summary?.name ?? selectedProjectId;
+    const confirmed = window.confirm(`Excluir o flow/projeto "${label}"? Esta ação remove a pasta projects/${selectedProjectId}.`);
+    if (!confirmed) {
+      return;
+    }
+    setStatus({ kind: "busy", message: `Excluindo ${selectedProjectId}.` });
+    try {
+      await deleteProject(selectedProjectId);
+      const result = await listProjects();
+      const nextProjectId = result.projects.find((project) => project.valid)?.id ?? result.projects[0]?.id ?? "";
+      setProjects(result.projects);
+      setSelectedProjectId(nextProjectId);
+      if (!nextProjectId) {
+        setLoaded(null);
+        setProjectDraft(null);
+        setPipelineDraft(null);
+      }
+      setStatus({ kind: "ok", message: `${label} excluído.` });
     } catch (error) {
       setStatus({ kind: "error", message: errorMessage(error) });
     }
@@ -1835,6 +1872,18 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    function handleDeleteKey(event: KeyboardEvent) {
+      if (event.key !== "Delete" || activeTab !== "pipeline" || isEditingTarget(event.target) || (!selectedNodeId && !selectedEdgeId)) {
+        return;
+      }
+      event.preventDefault();
+      removeSelected();
+    }
+    window.addEventListener("keydown", handleDeleteKey);
+    return () => window.removeEventListener("keydown", handleDeleteKey);
+  }, [activeTab, pipelineDraft, selectedEdgeId, selectedNodeId]);
+
   return (
     <div className="app-shell" data-theme={theme}>
       <header className="topbar">
@@ -1860,6 +1909,10 @@ export default function App() {
           <button type="button" className="command-button" onClick={() => void handleCreateProject()}>
             <Plus size={16} />
             Novo
+          </button>
+          <button type="button" className="command-button danger" onClick={() => void handleDeleteProject()} disabled={!selectedProjectId}>
+            <Trash2 size={16} />
+            Excluir
           </button>
         </div>
         <div className="topbar-actions">
@@ -1924,6 +1977,7 @@ export default function App() {
               onNodeDragStop={onNodeDragStop}
               onNodesDelete={onNodesDelete}
               onEdgesDelete={onEdgesDelete}
+              deleteKeyCode={["Backspace", "Delete"]}
               fitView
             >
               <Background />
@@ -2292,7 +2346,7 @@ function TabPanel(props: {
 
   if (props.activeTab === "project") {
     return (
-      <div className="panel-grid">
+      <div className="panel-grid project-grid">
         <section>
           <h2>Projeto</h2>
           <dl className="kv">
@@ -2308,33 +2362,42 @@ function TabPanel(props: {
             <dd>{props.project.runtime.persistence.primary}</dd>
           </dl>
         </section>
-        <section>
+        <section className="project-sources-section">
           <h2>Fontes</h2>
-          <div className="item-list">
+          <div className="source-card-list">
             {props.project.dataSources.map((source) => (
-              <div key={source.id} className="list-row">
-                <Database size={16} />
-                <span>{source.label}</span>
-                <code>{source.type}</code>
-                {source.type === "api" && source.api?.mocks?.length ? <code>{source.api.mocks.length} mock(s)</code> : null}
-                <button type="button" className="mini-button" onClick={() => props.onPreviewSource(source.id)}>
-                  Preview
-                </button>
-                {source.type === "sql" || source.type === "api" ? (
-                  <button type="button" className="mini-button" onClick={() => props.onPreviewSource(source.id, true)}>
-                    Real
+              <article key={source.id} className="source-card">
+                <div className="source-card-main">
+                  <Database size={16} />
+                  <div>
+                    <strong>{source.label}</strong>
+                    <span>{source.id}</span>
+                  </div>
+                  <div className="source-badges">
+                    <code>{source.type}</code>
+                    {source.type === "api" && source.api?.mocks?.length ? <code>{source.api.mocks.length} mock(s)</code> : null}
+                  </div>
+                </div>
+                <div className="source-actions">
+                  <button type="button" className="mini-button" onClick={() => props.onPreviewSource(source.id)}>
+                    Preview
                   </button>
-                ) : null}
-                <button type="button" className="mini-button" onClick={() => props.onStartSourcePreviewJob(source.id, source.type !== "csv")}>
-                  Preview job
-                </button>
-                <button type="button" className="mini-button" onClick={() => props.onTrainBaseline(source.id, source.type !== "csv")}>
-                  {source.type === "csv" ? "Treinar" : "Treinar real"}
-                </button>
-                <button type="button" className="mini-button" onClick={() => props.onStartTrainBaselineJob(source.id, source.type !== "csv")}>
-                  {source.type === "csv" ? "Job" : "Job real"}
-                </button>
-              </div>
+                  {source.type === "sql" || source.type === "api" ? (
+                    <button type="button" className="mini-button" onClick={() => props.onPreviewSource(source.id, true)}>
+                      Real
+                    </button>
+                  ) : null}
+                  <button type="button" className="mini-button" onClick={() => props.onStartSourcePreviewJob(source.id, source.type !== "csv")}>
+                    Preview job
+                  </button>
+                  <button type="button" className="mini-button" onClick={() => props.onTrainBaseline(source.id, source.type !== "csv")}>
+                    {source.type === "csv" ? "Treinar" : "Treinar real"}
+                  </button>
+                  <button type="button" className="mini-button" onClick={() => props.onStartTrainBaselineJob(source.id, source.type !== "csv")}>
+                    {source.type === "csv" ? "Job" : "Job real"}
+                  </button>
+                </div>
+              </article>
             ))}
           </div>
         </section>
@@ -2365,8 +2428,8 @@ function TabPanel(props: {
   if (props.activeTab === "studio") {
     const promotionRules = props.project.promotionPolicy.rules.length;
     return (
-      <div className="panel-grid">
-        <section>
+      <div className="panel-grid studio-grid">
+        <section className="studio-card studio-summary-card">
           <div className="section-title">
             <h2>Resumo do DAG</h2>
             <div className="inline-actions">
@@ -2395,7 +2458,7 @@ function TabPanel(props: {
             <Metric label="Python" value={props.pipeline.nodes.filter((node) => node.type === "python_function").length} />
           </div>
         </section>
-        <section>
+        <section className="studio-card studio-promotion-card">
           <div className="section-title">
             <h2>Promoção</h2>
             <div className="inline-actions">
@@ -2425,9 +2488,8 @@ function TabPanel(props: {
           </div>
           {props.promotionStatus?.message ? <p className="muted">{props.promotionStatus.message}</p> : null}
           {props.promotionStatus?.evidence.length ? <EvidenceList evidence={props.promotionStatus.evidence} /> : null}
-          <PromotionPolicyEditor project={props.project} promotionStatus={props.promotionStatus} onUpdateProject={props.onUpdateProject} />
         </section>
-        <section>
+        <section className="studio-card studio-evaluation-card">
           <div className="section-title">
             <h2>Avaliação</h2>
             <div className="inline-actions">
@@ -2490,6 +2552,10 @@ function TabPanel(props: {
               <span>Nenhuma avaliação executada.</span>
             </div>
           )}
+        </section>
+        <section className="wide-section studio-policy-section">
+          <h2>Política de promoção</h2>
+          <PromotionPolicyEditor project={props.project} promotionStatus={props.promotionStatus} onUpdateProject={props.onUpdateProject} />
         </section>
         {props.trainingResult ? (
           <section className="wide-section">
@@ -2592,7 +2658,10 @@ function TabPanel(props: {
               Atualizar
             </button>
           </div>
-          <input value={props.generatedOutDir} onChange={(event) => props.setGeneratedOutDir(event.target.value)} />
+          <label className="form-field">
+            Saída gerada
+            <input value={props.generatedOutDir} onChange={(event) => props.setGeneratedOutDir(event.target.value)} />
+          </label>
           <div className="item-list">
             {(props.artifactListing?.files ?? []).map((file) => (
               <button key={file.path} type="button" className="file-row" onClick={() => props.onReadArtifact(file.path)}>
@@ -2605,34 +2674,36 @@ function TabPanel(props: {
         </section>
         <section className="artifact-list">
           <h2>Reimportação</h2>
-          <dl className="kv">
-            <dt>Origem</dt>
-            <dd>{props.generatedOutDir}</dd>
-            <dt>Destino</dt>
-            <dd>
+          <div className="form-stack">
+            <div className="field-readonly">
+              <span>Origem</span>
+              <strong>{props.generatedOutDir}</strong>
+            </div>
+            <label className="form-field">
+              Destino
               <input value={props.importTargetProjectId} onChange={(event) => props.setImportTargetProjectId(event.target.value)} />
-            </dd>
-            <dt>Zip</dt>
-            <dd>
+            </label>
+            <label className="form-field">
+              Zip
               <input value={props.runtimeZipPath} onChange={(event) => props.setRuntimeZipPath(event.target.value)} />
-            </dd>
-            <dt>Git</dt>
-            <dd>
+            </label>
+            <label className="form-field">
+              Git
               <input value={props.runtimeGitUrl} onChange={(event) => props.setRuntimeGitUrl(event.target.value)} />
-            </dd>
-            <dt>Ref</dt>
-            <dd>
+            </label>
+            <label className="form-field">
+              Ref
               <input value={props.runtimeGitRef} onChange={(event) => props.setRuntimeGitRef(event.target.value)} />
-            </dd>
-            <dt>Imagem Docker</dt>
-            <dd>
+            </label>
+            <label className="form-field">
+              Imagem Docker
               <input value={props.runtimeDockerImage} onChange={(event) => props.setRuntimeDockerImage(event.target.value)} placeholder="mlops/demo-runtime:latest" />
-            </dd>
-            <dt>Porta</dt>
-            <dd>
+            </label>
+            <label className="form-field">
+              Porta
               <input value={props.runtimeDockerPort} onChange={(event) => props.setRuntimeDockerPort(event.target.value)} inputMode="numeric" />
-            </dd>
-          </dl>
+            </label>
+          </div>
           <button type="button" className="command-button full-width" onClick={props.onExportRuntimeZip}>
             <FileCode2 size={16} />
             Gerar zip
@@ -2671,7 +2742,7 @@ function TabPanel(props: {
     const approvedRetraining = latestApprovedRuntimeRetrainingRequest(props.remoteRuntimeInspection);
     const canStartApprovedRetraining = !!approvedRetraining && !!props.trainingResult;
     return (
-      <div className="panel-grid">
+      <div className="panel-grid runtime-grid">
         <section>
           <h2>Runtime</h2>
           <dl className="kv">

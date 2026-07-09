@@ -1,0 +1,153 @@
+id: classificacao-de-tickets
+name: Classificação de Tickets
+version: 0.1.0
+contract: mlops-flow-v1
+description: Projeto inicial gerado pelo MLOps Flow Studio.
+problem:
+  type: multiclass_classification
+  target: categoria
+  classes:
+    - billing
+    - technical
+    - access
+    - cancellation
+  classDependencies: []
+domain:
+  kind: generic
+execution:
+  profile: cpu
+metrics:
+  primary: f1_macro
+  secondary:
+    - accuracy
+    - f1_weighted
+    - latency_p95_ms
+dataSources:
+  - id: tickets_csv
+    type: csv
+    label: CSV de tickets
+    sensitive: true
+    csv:
+      path: data/tickets.csv
+      delimiter: ","
+      hasHeader: true
+      encoding: utf-8
+    schema: {}
+    sensitiveFields:
+      - email
+      - documento
+      - telefone
+  - id: warehouse_sql
+    type: sql
+    label: Consulta SQL de histórico
+    sensitive: false
+    sql:
+      connectionRef: env:WAREHOUSE_DATABASE_URL
+      query: SELECT * FROM tickets LIMIT 1000
+      previewLimit: 50
+    schema: {}
+    sensitiveFields: []
+  - id: support_api
+    type: api
+    label: API externa de suporte
+    sensitive: false
+    api:
+      method: GET
+      url: https://api.example.local/tickets
+      headers:
+        Authorization: env:SUPPORT_API_TOKEN
+      mocks:
+        - id: support_api_contract
+          description: Resposta sintética para preview e treino seguro sem rede externa.
+          request:
+            method: GET
+            path: /tickets
+          response:
+            httpStatus: 200
+            body:
+              - id: 1
+                text: classe_a boleto pagamento
+                classe_final: classe_a
+                email: mock-a@example.com
+              - id: 2
+                text: classe_b erro login
+                classe_final: classe_b
+                email: mock-b@example.com
+      timeoutSeconds: 30
+    schema: {}
+    sensitiveFields: []
+pipelineRef: pipeline.flow.json
+promotionPolicy:
+  id: default-promotion-policy
+  mode: manual_approval
+  baseline: active_model
+  rules:
+    - kind: metric
+      id: f1_macro_minimo
+      label: F1 macro mínimo
+      left:
+        metric: f1_macro
+        scope: candidate
+        phase: validation
+      operator: gte
+      value: 0.78
+      neutralBand: 0.01
+      severity: block
+      rationale: Evita promover modelo com qualidade inferior ao limiar mínimo.
+    - kind: metric
+      id: latencia_p95
+      label: Latência p95 aceitável
+      left:
+        metric: latency_p95_ms
+        scope: runtime
+        phase: runtime
+      operator: lte
+      value: 750
+      neutralBand: 25
+      severity: review
+      rationale: Mantém o modelo novo dentro de limite operacional aceitável.
+runtime:
+  apiName: Classificação de Tickets API
+  routePrefix: ""
+  persistence:
+    primary: postgres
+    databaseUrlRef: env:DATABASE_URL
+  dashboard:
+    enabled: true
+    pages:
+      - overview
+      - data
+      - models
+      - prediction
+      - monitoring
+      - events
+      - docs
+    highlightedMetrics:
+      - f1_macro
+      - accuracy
+      - latency_p95_ms
+  mlflow:
+    enabled: false
+    trackingUriRef: env:MLFLOW_TRACKING_URI
+    registryEnabled: false
+  capabilities:
+    mode: auto
+    providers: {}
+modelCard:
+  intendedUse: Classificar entradas operacionais e expor evidências de versão,
+    métricas e promoção.
+  limitations:
+    - Projeto inicial usa modelos candidatos configuráveis e precisa de dados
+      reais antes de produção.
+  monitoring:
+    - prediction_logs
+    - runtime_metrics
+    - drift_basic
+  riskLevel: medium
+sensitiveFields:
+  - email
+  - documento
+  - telefone
+dependencies:
+  - scikit-learn>=1.5,<2
+owners: []

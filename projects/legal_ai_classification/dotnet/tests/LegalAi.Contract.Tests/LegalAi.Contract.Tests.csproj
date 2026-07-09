@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\LegalAi.Application\LegalAi.Application.csproj" />
+    <ProjectReference Include="..\..\src\LegalAi.Domain\LegalAi.Domain.csproj" />
+  </ItemGroup>
+</Project>

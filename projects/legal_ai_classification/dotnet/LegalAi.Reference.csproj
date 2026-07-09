@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="src\LegalAi.Domain\LegalAi.Domain.csproj" />
+    <ProjectReference Include="src\LegalAi.Application\LegalAi.Application.csproj" />
+    <ProjectReference Include="src\LegalAi.Infrastructure\LegalAi.Infrastructure.csproj" />
+    <ProjectReference Include="src\LegalAi.Api\LegalAi.Api.csproj" />
+    <ProjectReference Include="tests\LegalAi.Contract.Tests\LegalAi.Contract.Tests.csproj" />
+  </ItemGroup>
+</Project>

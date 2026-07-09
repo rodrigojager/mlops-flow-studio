@@ -74,6 +74,13 @@ export async function createProject(): Promise<LoadedProject> {
   });
 }
 
+export async function deleteProject(projectId: string): Promise<{ status: string; projectId: string }> {
+  return request(`/projects/${encodeURIComponent(projectId)}`, {
+    method: "DELETE",
+    body: JSON.stringify({ confirm: true }),
+  });
+}
+
 export async function importRuntimeProject(sourceDir: string, targetProjectId?: string): Promise<ImportedRuntimeProject> {
   return request("/projects/import-runtime", {
     method: "POST",

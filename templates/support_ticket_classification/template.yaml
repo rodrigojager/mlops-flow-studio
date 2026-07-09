@@ -1,0 +1,25 @@
+id: support_ticket_classification
+name: Classificação de Tickets de Suporte
+category: starter
+validationCase: false
+description: Template inicial para classificação multiclasse com múltiplas fontes, modelos candidatos e decisor determinístico.
+instantiates:
+  project: ../../examples/support_ticket_classification/project.yaml
+  pipeline: ../../examples/support_ticket_classification/pipeline.flow.json
+principles:
+  - Pipeline simples deve continuar funcionando sem Qdrant, MLflow, LLM ou worker externo.
+  - Embeddings são capacidade opcional e podem ser removidos ou substituídos sem mudar o contrato geral.
+capabilities:
+  - data_ingestion
+  - preprocessing
+  - embeddings
+  - model_training
+  - model_inference
+  - decision
+  - rules
+  - evaluation
+providers:
+  embeddings:
+    provider: sentence-transformers
+    mode: external
+    required: false

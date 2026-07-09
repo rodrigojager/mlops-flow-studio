@@ -1107,9 +1107,13 @@ def train_stdlib_text_naive_bayes(
                 "strategy": "full_retrain",
                 "reason": "Artefato base compatível não encontrado para este modelo.",
             }
-    predictions = [predict_text_naive_bayes(model, row, target, project.get("sensitiveFields", [])) for row in validation_rows]
+    probability_rows = [predict_text_naive_bayes_probabilities(model, row, target, project.get("sensitiveFields", [])) for row in validation_rows]
+    predictions = [max(probabilities.items(), key=lambda item: item[1])[0] for probabilities in probability_rows]
     actuals = [str(row[target]) for row in validation_rows]
-    metrics = classification_metrics(actuals, predictions, labels)
+    metrics = {
+        **classification_metrics(actuals, predictions, labels, probability_rows),
+        **classification_policy_metrics(project, validation_rows, predictions, probability_rows, target),
+    }
     payload = {"type": "standard_lib_text_naive_bayes", "model": model}
     if incremental_metadata:
         payload["incremental"] = incremental_metadata
@@ -1199,8 +1203,12 @@ def train_sklearn_text_classifier(
 
     estimator = Pipeline([("hashing", vectorizer), ("classifier", classifier)])
     predictions = [str(item) for item in estimator.predict(validation_texts)]
+    probability_rows = estimator_probability_rows(estimator, validation_texts, labels)
     actuals = [str(row[target]) for row in validation_rows]
-    metrics = classification_metrics(actuals, predictions, labels)
+    metrics = {
+        **classification_metrics(actuals, predictions, labels, probability_rows),
+        **classification_policy_metrics(project, validation_rows, predictions, probability_rows, target),
+    }
     payload = {
         "type": "sklearn_text_classifier",
         "format": "pickle_base64",
@@ -1307,8 +1315,12 @@ def train_sentence_transformers_classifier(
             }
 
     predictions = [str(item) for item in estimator.predict(validation_matrix)]
+    probability_rows = estimator_probability_rows(estimator, validation_matrix, labels)
     actuals = [str(row[target]) for row in validation_rows]
-    metrics = classification_metrics(actuals, predictions, labels)
+    metrics = {
+        **classification_metrics(actuals, predictions, labels, probability_rows),
+        **classification_policy_metrics(project, validation_rows, predictions, probability_rows, target),
+    }
     payload = {
         "type": "sentence_transformers_text_classifier",
         "format": "pickle_base64",
@@ -1657,8 +1669,12 @@ def train_xgboost_text_classifier(
     validation_matrix = vectorizer.transform(validation_texts)
     encoded_predictions = estimator.predict(validation_matrix)
     predictions = [class_names[int(item)] if 0 <= int(item) < len(class_names) else str(item) for item in encoded_predictions]
+    probability_rows = estimator_probability_rows(estimator, validation_matrix, class_names)
     actuals = [str(row[target]) for row in validation_rows]
-    metrics = classification_metrics(actuals, predictions, labels)
+    metrics = {
+        **classification_metrics(actuals, predictions, labels, probability_rows),
+        **classification_policy_metrics(project, validation_rows, predictions, probability_rows, target),
+    }
     payload = {
         "type": "xgboost_text_classifier",
         "format": "pickle_base64",
@@ -1828,6 +1844,11 @@ def fit_text_naive_bayes(rows: list[dict[str, Any]], target: str, sensitive_fiel
 
 
 def predict_text_naive_bayes(model: dict[str, Any], row: dict[str, Any], target: str, sensitive_fields: list[str]) -> str:
+    probabilities = predict_text_naive_bayes_probabilities(model, row, target, sensitive_fields)
+    return max(probabilities.items(), key=lambda item: item[1])[0]
+
+
+def predict_text_naive_bayes_probabilities(model: dict[str, Any], row: dict[str, Any], target: str, sensitive_fields: list[str]) -> dict[str, float]:
     class_counts = {label: int(count) for label, count in model["classCounts"].items()}
     token_counts = {label: Counter(counts) for label, counts in model["tokenCounts"].items()}
     total_tokens = {label: int(count) for label, count in model["totalTokens"].items()}
@@ -1842,7 +1863,16 @@ def predict_text_naive_bayes(model: dict[str, Any], row: dict[str, Any], target:
         for token in tokens:
             score += math.log((token_counts[label].get(token, 0) + 1) / denominator)
         scores[label] = score
-    return max(scores.items(), key=lambda item: item[1])[0]
+    return softmax_scores(scores)
+
+
+def softmax_scores(scores: dict[str, float]) -> dict[str, float]:
+    if not scores:
+        return {}
+    max_score = max(scores.values())
+    exps = {label: math.exp(score - max_score) for label, score in scores.items()}
+    total = sum(exps.values()) or 1.0
+    return {label: round(value / total, 6) for label, value in exps.items()}
 
 
 def incremental_training_context(request: dict[str, Any], project_root: Path) -> dict[str, Any] | None:
@@ -1973,6 +2003,60 @@ def predict_from_artifact(artifact: dict[str, Any], row: dict[str, Any], target:
     raise WorkerError(f"Tipo de artefato não suportado para avaliação: {artifact_type}")
 
 
+def predict_from_artifact_with_probabilities(artifact: dict[str, Any], row: dict[str, Any], target: str, sensitive_fields: list[str]) -> dict[str, Any]:
+    artifact_type = str(artifact.get("type") or "")
+    if artifact_type == "standard_lib_text_naive_bayes":
+        model = artifact.get("model")
+        if not isinstance(model, dict):
+            raise WorkerError("Artefato naive_bayes inválido.")
+        probabilities = predict_text_naive_bayes_probabilities(model, row, target, sensitive_fields)
+        return {"prediction": max(probabilities.items(), key=lambda item: item[1])[0], "probabilities": probabilities}
+    if artifact_type == "sklearn_text_classifier":
+        estimator = decode_pickle_base64(str(artifact.get("modelBase64") or ""))
+        text = text_from_row(row, target, artifact.get("sensitiveFields", sensitive_fields))
+        prediction = str(estimator.predict([text])[0])
+        labels = [str(item) for item in artifact.get("classes", [])]
+        probability_rows = estimator_probability_rows(estimator, [text], labels)
+        return {"prediction": prediction, "probabilities": probability_rows[0] if probability_rows else {prediction: 1.0}}
+    if artifact_type == "sentence_transformers_text_classifier":
+        estimator = decode_pickle_base64(str(artifact.get("modelBase64") or ""))
+        matrix = encode_sentence_transformer_rows([row], target, artifact.get("sensitiveFields", sensitive_fields), artifact)
+        prediction = str(estimator.predict(matrix)[0])
+        labels = [str(item) for item in artifact.get("classes", [])]
+        probability_rows = estimator_probability_rows(estimator, matrix, labels)
+        return {"prediction": prediction, "probabilities": probability_rows[0] if probability_rows else {prediction: 1.0}}
+    if artifact_type == "xgboost_text_classifier":
+        vectorizer = decode_pickle_base64(str(artifact.get("vectorizerBase64") or ""))
+        estimator = decode_pickle_base64(str(artifact.get("modelBase64") or ""))
+        text = text_from_row(row, target, artifact.get("sensitiveFields", sensitive_fields))
+        matrix = vectorizer.transform([text])
+        encoded = estimator.predict(matrix)[0]
+        labels = [str(item) for item in artifact.get("classes", [])]
+        index = int(encoded)
+        prediction = labels[index] if 0 <= index < len(labels) else str(encoded)
+        probability_rows = estimator_probability_rows(estimator, matrix, labels)
+        return {"prediction": prediction, "probabilities": probability_rows[0] if probability_rows else {prediction: 1.0}}
+    return {"prediction": predict_from_artifact(artifact, row, target, sensitive_fields), "probabilities": {}}
+
+
+def estimator_probability_rows(estimator: Any, inputs: Any, labels: list[str]) -> list[dict[str, float]]:
+    if not hasattr(estimator, "predict_proba"):
+        return []
+    try:
+        raw_rows = estimator.predict_proba(inputs)
+    except Exception:
+        return []
+    estimator_classes = [str(item) for item in getattr(estimator, "classes_", [])]
+    if estimator_classes and len(estimator_classes) == len(raw_rows[0]) and (not labels or set(estimator_classes).issubset(set(labels))):
+        classes = estimator_classes
+    else:
+        classes = labels
+    probability_rows: list[dict[str, float]] = []
+    for row in raw_rows:
+        probability_rows.append({label: round(float(value), 6) for label, value in zip(classes, row)})
+    return probability_rows
+
+
 def find_leaderboard_model(training_result: dict[str, Any], model_id: str) -> dict[str, Any]:
     model_row = next((row for row in training_result.get("leaderboard", []) if isinstance(row, dict) and row.get("modelId") == model_id), None)
     if not isinstance(model_row, dict):
@@ -1997,16 +2081,22 @@ def evaluate_leaderboard_model(
         raise WorkerError(f"Modelo {model_id} não tem artifactUri no treino.")
     sensitive_fields = source_sensitive_fields + project.get("sensitiveFields", [])
     artifact = load_model_artifact(project_root, artifact_uri)
-    predictions = [predict_from_artifact(artifact, row, target, sensitive_fields) for row in rows]
     if problem_type == "regression":
+        predictions = [predict_from_artifact(artifact, row, target, sensitive_fields) for row in rows]
         actuals_float = [float(row[target]) for row in rows]
         predictions_float = [float(prediction) for prediction in predictions]
         metrics = regression_metrics(actuals_float, predictions_float)
     else:
+        prediction_payloads = [predict_from_artifact_with_probabilities(artifact, row, target, sensitive_fields) for row in rows]
+        predictions = [item["prediction"] for item in prediction_payloads]
+        probability_rows = [item.get("probabilities", {}) for item in prediction_payloads]
         actuals = [str(row[target]) for row in rows]
         predictions_str = [str(prediction) for prediction in predictions]
         labels = sorted(set(project.get("problem", {}).get("classes") or []) | set(actuals) | set(predictions_str))
-        metrics = classification_metrics(actuals, predictions_str, labels)
+        metrics = {
+            **classification_metrics(actuals, predictions_str, labels, probability_rows),
+            **classification_policy_metrics(project, rows, predictions_str, probability_rows, target),
+        }
     return {
         "modelId": model_id,
         "artifactUri": artifact_uri,
@@ -2022,7 +2112,7 @@ def evaluate_leaderboard_model(
     }
 
 
-def classification_metrics(actuals: list[str], predictions: list[str], labels: list[str]) -> dict[str, Any]:
+def classification_metrics(actuals: list[str], predictions: list[str], labels: list[str], probability_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     total = max(1, len(actuals))
     accuracy = sum(1 for actual, prediction in zip(actuals, predictions) if actual == prediction) / total
     per_label = {}
@@ -2044,16 +2134,205 @@ def classification_metrics(actuals: list[str], predictions: list[str], labels: l
             weighted_sum += f1 * support
     f1_macro = sum(f1_values) / len(f1_values) if f1_values else 0.0
     matrix = [[sum(1 for actual, prediction in zip(actuals, predictions) if actual == left and prediction == right) for right in labels] for left in labels]
+    probabilities = normalize_probability_rows(probability_rows or [], labels, predictions)
     return {
         "accuracy": round(accuracy, 6),
         "f1_macro": round(f1_macro, 6),
         "f1_weighted": round(weighted_sum / total, 6),
         "precision_macro": round(sum(item["precision"] for item in per_label.values()) / max(1, len(per_label)), 6),
         "recall_macro": round(sum(item["recall"] for item in per_label.values()) / max(1, len(per_label)), 6),
+        "top_3_accuracy": top_k_accuracy(actuals, probabilities, 3),
+        "top_5_accuracy": top_k_accuracy(actuals, probabilities, 5),
+        "brier_score": brier_score(actuals, probabilities, labels),
+        "expected_calibration_error": expected_calibration_error(actuals, predictions, probabilities),
+        "roc_auc_ovr": roc_auc_ovr(actuals, probabilities, labels),
+        "pr_auc_macro": pr_auc_macro(actuals, probabilities, labels),
+        "semantic_recall_at_5": top_k_accuracy(actuals, probabilities, 5),
         "labels": labels,
         "per_label": per_label,
         "confusion_matrix": matrix,
     }
+
+
+def normalize_probability_rows(probability_rows: list[dict[str, Any]], labels: list[str], predictions: list[str]) -> list[dict[str, float]]:
+    normalized_rows: list[dict[str, float]] = []
+    for index, prediction in enumerate(predictions):
+        source = probability_rows[index] if index < len(probability_rows) and isinstance(probability_rows[index], dict) else {}
+        row: dict[str, float] = {}
+        for label in labels:
+            value = as_probability(source.get(label))
+            row[label] = value if value is not None else 0.0
+        if prediction and sum(row.values()) <= 0:
+            row[prediction] = 1.0
+        normalized_rows.append(row)
+    return normalized_rows
+
+
+def top_k_accuracy(actuals: list[str], probability_rows: list[dict[str, float]], k: int) -> float:
+    if not actuals:
+        return 0.0
+    hits = 0
+    for actual, probabilities in zip(actuals, probability_rows):
+        top_labels = [label for label, _score in sorted(probabilities.items(), key=lambda item: item[1], reverse=True)[:k]]
+        if actual in top_labels:
+            hits += 1
+    return round(hits / max(1, len(actuals)), 6)
+
+
+def brier_score(actuals: list[str], probability_rows: list[dict[str, float]], labels: list[str]) -> float:
+    if not actuals:
+        return 0.0
+    total = 0.0
+    for actual, probabilities in zip(actuals, probability_rows):
+        total += sum((float(probabilities.get(label, 0.0)) - (1.0 if actual == label else 0.0)) ** 2 for label in labels)
+    return round(total / max(1, len(actuals)), 6)
+
+
+def expected_calibration_error(actuals: list[str], predictions: list[str], probability_rows: list[dict[str, float]], bins: int = 10) -> float:
+    if not actuals:
+        return 0.0
+    ece = 0.0
+    total = len(actuals)
+    for bucket in range(bins):
+        lower = bucket / bins
+        upper = (bucket + 1) / bins
+        indexes = []
+        for index, probabilities in enumerate(probability_rows):
+            confidence = max(probabilities.values(), default=0.0)
+            if (bucket == 0 and lower <= confidence <= upper) or (lower < confidence <= upper):
+                indexes.append(index)
+        if not indexes:
+            continue
+        bucket_accuracy = sum(1 for index in indexes if actuals[index] == predictions[index]) / len(indexes)
+        bucket_confidence = sum(max(probability_rows[index].values(), default=0.0) for index in indexes) / len(indexes)
+        ece += (len(indexes) / total) * abs(bucket_accuracy - bucket_confidence)
+    return round(ece, 6)
+
+
+def roc_auc_ovr(actuals: list[str], probability_rows: list[dict[str, float]], labels: list[str]) -> float | None:
+    values = []
+    for label in labels:
+        auc = binary_roc_auc([actual == label for actual in actuals], [row.get(label, 0.0) for row in probability_rows])
+        if auc is not None:
+            values.append(auc)
+    return round(sum(values) / len(values), 6) if values else None
+
+
+def binary_roc_auc(positives: list[bool], scores: list[float]) -> float | None:
+    positive_scores = [score for is_positive, score in zip(positives, scores) if is_positive]
+    negative_scores = [score for is_positive, score in zip(positives, scores) if not is_positive]
+    if not positive_scores or not negative_scores:
+        return None
+    wins = 0.0
+    for positive_score in positive_scores:
+        for negative_score in negative_scores:
+            if positive_score > negative_score:
+                wins += 1.0
+            elif positive_score == negative_score:
+                wins += 0.5
+    return wins / (len(positive_scores) * len(negative_scores))
+
+
+def pr_auc_macro(actuals: list[str], probability_rows: list[dict[str, float]], labels: list[str]) -> float | None:
+    values = []
+    for label in labels:
+        value = average_precision([actual == label for actual in actuals], [row.get(label, 0.0) for row in probability_rows])
+        if value is not None:
+            values.append(value)
+    return round(sum(values) / len(values), 6) if values else None
+
+
+def average_precision(positives: list[bool], scores: list[float]) -> float | None:
+    total_positives = sum(1 for item in positives if item)
+    if total_positives <= 0:
+        return None
+    ranked = sorted(zip(scores, positives), key=lambda item: item[0], reverse=True)
+    hits = 0
+    precision_sum = 0.0
+    for index, (_score, is_positive) in enumerate(ranked, start=1):
+        if is_positive:
+            hits += 1
+            precision_sum += hits / index
+    return precision_sum / total_positives
+
+
+def classification_policy_metrics(
+    project: dict[str, Any],
+    rows: list[dict[str, Any]],
+    predictions: list[str],
+    probability_rows: list[dict[str, Any]],
+    target: str,
+) -> dict[str, float]:
+    legal = legal_domain_config(project)
+    total = max(1, len(predictions))
+    low_confidence = 0
+    human_review = 0
+    llm_review = 0
+    invalid_workflow = 0
+    for index, prediction in enumerate(predictions):
+        row = rows[index] if index < len(rows) else {}
+        probabilities = probability_rows[index] if index < len(probability_rows) and isinstance(probability_rows[index], dict) else {}
+        confidence = as_probability(probabilities.get(prediction))
+        if legal:
+            reasons = legal_review_reasons(legal, row, prediction, confidence)
+            if "workflow_blocked" in reasons:
+                invalid_workflow += 1
+            if "low_confidence" in reasons:
+                low_confidence += 1
+            if reasons:
+                human_review += 1
+            llm = legal.get("llm") if isinstance(legal.get("llm"), dict) else {}
+            triggers = [str(item) for item in llm.get("triggerPolicy", [])] if isinstance(llm.get("triggerPolicy"), list) else []
+            if bool(llm.get("enabled", False)) and any(reason in triggers for reason in reasons):
+                llm_review += 1
+        elif confidence is not None and confidence < 0.5:
+            low_confidence += 1
+    return {
+        "low_confidence_rate": round(low_confidence / total, 6),
+        "human_review_rate": round(human_review / total, 6),
+        "llm_review_rate": round(llm_review / total, 6),
+        "invalid_workflow_transition_rate": round(invalid_workflow / total, 6),
+    }
+
+
+def legal_domain_config(project: dict[str, Any]) -> dict[str, Any] | None:
+    domain = project.get("domain", {})
+    if not isinstance(domain, dict) or domain.get("kind") != "legal_classification":
+        return None
+    legal = domain.get("legal")
+    return legal if isinstance(legal, dict) else None
+
+
+def legal_review_reasons(legal: dict[str, Any], row: dict[str, Any], prediction: str, confidence: float | None) -> list[str]:
+    reasons: list[str] = []
+    policy = legal.get("decisionPolicy") if isinstance(legal.get("decisionPolicy"), dict) else {}
+    low_threshold = float(policy.get("lowConfidenceThreshold") or 0.62)
+    if confidence is not None and confidence < low_threshold:
+        reasons.append("low_confidence")
+    category = next((item for item in legal.get("categories", []) if isinstance(item, dict) and str(item.get("code")) == prediction), {})
+    workflow_field = str(legal.get("workflowContextField") or "workflow_step_atual")
+    current_step = row.get(workflow_field)
+    current_step_code = str(current_step) if current_step is not None and str(current_step).strip() else None
+    allowed_steps = [str(item) for item in category.get("workflowStepCodes", [])] if isinstance(category, dict) else []
+    if current_step_code and allowed_steps and current_step_code not in allowed_steps:
+        reasons.append("workflow_blocked")
+    elif not current_step_code and allowed_steps:
+        reasons.append("workflow_requires_review")
+    if isinstance(category, dict) and category.get("critical"):
+        reasons.append("critical_category")
+    if isinstance(category, dict) and category.get("requiresHumanReview"):
+        reasons.append("category_requires_human_review")
+    return reasons
+
+
+def as_probability(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(numeric) or math.isinf(numeric):
+        return None
+    return max(0.0, min(1.0, round(numeric, 6)))
 
 
 def regression_metrics(actuals: list[float], predictions: list[float]) -> dict[str, float]:

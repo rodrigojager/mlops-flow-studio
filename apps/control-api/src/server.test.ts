@@ -11,6 +11,49 @@ import { buildApp } from "./server.ts";
 
 const execFileAsync = promisify(execFile);
 
+async function exists(targetPath: string): Promise<boolean> {
+  try {
+    await stat(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("control api exclui projeto com confirmacao explicita", async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-delete-"));
+  const app = buildApp({ workspaceRoot });
+  try {
+    const created = await app.inject({
+      method: "POST",
+      url: "/projects",
+      payload: { id: "delete_demo", name: "Delete Demo" },
+    });
+    assert.equal(created.statusCode, 200);
+    assert.equal(await exists(path.join(workspaceRoot, "projects", "delete_demo", "project.yaml")), true);
+
+    const rejected = await app.inject({
+      method: "DELETE",
+      url: "/projects/delete_demo",
+      payload: { confirm: false },
+    });
+    assert.equal(rejected.statusCode, 400);
+    assert.equal(await exists(path.join(workspaceRoot, "projects", "delete_demo", "project.yaml")), true);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/projects/delete_demo",
+      payload: { confirm: true },
+    });
+    assert.equal(deleted.statusCode, 200);
+    assert.equal(deleted.json().projectId, "delete_demo");
+    assert.equal(await exists(path.join(workspaceRoot, "projects", "delete_demo")), false);
+  } finally {
+    await app.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("control api cria, valida e gera runtime", async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-"));
   const snapshotStoreRoot = path.join(workspaceRoot, "snapshot-store");

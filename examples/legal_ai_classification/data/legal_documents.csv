@@ -1,0 +1,25 @@
+id,texto,tribunal,uf,classe_processual,assunto,rito,workflow_step_atual,numero_paginas,possui_anexos,ocr_confidence,categoria_final
+1,peticao inicial qualifica partes narra fatos apresenta pedidos e valor da causa,TJSP,SP,Procedimento Comum,Responsabilidade civil,procedimento_comum,pre_distribuicao,8,false,0.98,PETICAO_INICIAL
+2,inicial requer tutela de urgencia juntada de documentos e citacao do requerido,TJSP,SP,Procedimento Comum,Obrigacao de fazer,procedimento_comum,pre_distribuicao,11,true,0.96,PETICAO_INICIAL
+3,exordial apresenta causa de pedir pedido principal e provas documentais,TJRJ,RJ,Procedimento Comum,Contratos,procedimento_comum,pre_distribuicao,7,true,0.95,PETICAO_INICIAL
+4,contestacao impugna fatos alega preliminares e requer improcedencia,TJSP,SP,Procedimento Comum,Responsabilidade civil,procedimento_comum,citacao,14,true,0.97,CONTESTACAO
+5,defesa do reu contesta pedidos discute provas e apresenta documentos,TJMG,MG,Procedimento Comum,Consumidor,procedimento_comum,citacao,12,true,0.94,CONTESTACAO
+6,contestacao com preliminar de ilegitimidade e impugnacao ao valor da causa,TJPR,PR,Procedimento Comum,Contratos,procedimento_comum,citacao,10,false,0.93,CONTESTACAO
+7,sentenca julga procedente em parte resolve merito e fixa honorarios,TJSP,SP,Procedimento Comum,Responsabilidade civil,procedimento_comum,instrucao,9,false,0.99,SENTENCA
+8,decisao final analisa provas reconhece direito e extingue processo com merito,TJRS,RS,Procedimento Comum,Consumidor,procedimento_comum,instrucao,8,false,0.98,SENTENCA
+9,sentenca improcedente fundamenta ausencia de prova e condena em custas,TJMG,MG,Procedimento Comum,Contratos,procedimento_comum,instrucao,6,false,0.97,SENTENCA
+10,recurso de apelacao reforma da sentenca razoes recursais e pedido de provimento,TJSP,SP,Procedimento Comum,Responsabilidade civil,procedimento_comum,sentenca,15,true,0.96,RECURSO_APELACAO
+11,apelacao civel combate fundamentos da sentenca e requer novo julgamento,TJRJ,RJ,Procedimento Comum,Consumidor,procedimento_comum,sentenca,13,true,0.95,RECURSO_APELACAO
+12,razoes de apelacao sustentam error in judicando e pedido de reforma,TJPR,PR,Procedimento Comum,Contratos,procedimento_comum,sentenca,16,false,0.94,RECURSO_APELACAO
+13,agravo de instrumento contra decisao interlocutoria com pedido de efeito suspensivo,TJSP,SP,Procedimento Comum,Tutela de urgencia,procedimento_comum,decisao_interlocutoria,18,true,0.95,AGRAVO_INSTRUMENTO
+14,recurso de agravo impugna decisao que indeferiu tutela antecipada,TJMG,MG,Procedimento Comum,Obrigacao de fazer,procedimento_comum,decisao_interlocutoria,12,true,0.93,AGRAVO_INSTRUMENTO
+15,agravo instrui copia da decisao agravada procuração e comprovante de preparo,TJRJ,RJ,Procedimento Comum,Contratos,procedimento_comum,decisao_interlocutoria,20,true,0.91,AGRAVO_INSTRUMENTO
+16,cumprimento de sentenca requer pagamento do valor homologado e multa,TJSP,SP,Procedimento Comum,Cobranca,procedimento_comum,pos_sentenca,9,true,0.98,CUMPRIMENTO_SENTENCA
+17,exequente inicia cumprimento definitivo com memoria de calculo atualizada,TJRS,RS,Procedimento Comum,Contratos,procedimento_comum,transito_julgado,7,true,0.96,CUMPRIMENTO_SENTENCA
+18,requer bloqueio sisbajud no cumprimento de sentenca por inadimplemento,TJMG,MG,Procedimento Comum,Cobranca,procedimento_comum,pos_sentenca,5,false,0.94,CUMPRIMENTO_SENTENCA
+19,embargos de declaracao apontam omissao e contradicao no julgado,TJSP,SP,Procedimento Comum,Responsabilidade civil,procedimento_comum,sentenca,6,false,0.97,EMBARGOS_DECLARACAO
+20,parte opoe aclaratorios para sanar obscuridade e prequestionar materia,TJRJ,RJ,Procedimento Comum,Consumidor,procedimento_comum,sentenca,5,false,0.95,EMBARGOS_DECLARACAO
+21,embargos declaratorios requerem integracao da decisao por erro material,TJPR,PR,Procedimento Comum,Contratos,procedimento_comum,sentenca,4,false,0.93,EMBARGOS_DECLARACAO
+22,acordo homologacao partes transigem e pedem extincao com resolucao,TJSP,SP,Procedimento Comum,Contratos,procedimento_comum,audiencia_conciliacao,4,true,0.98,ACORDO_HOMOLOGACAO
+23,peticao informa composicao amigavel parcelas e requer homologacao judicial,TJMG,MG,Procedimento Comum,Consumidor,procedimento_comum,audiencia_conciliacao,5,true,0.96,ACORDO_HOMOLOGACAO
+24,minuta de acordo assinada pelas partes pede suspensao ate cumprimento integral,TJRS,RS,Procedimento Comum,Cobranca,procedimento_comum,audiencia_conciliacao,6,true,0.95,ACORDO_HOMOLOGACAO

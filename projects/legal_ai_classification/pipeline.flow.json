@@ -1,0 +1,270 @@
+{
+  "id": "legal-ai-classification-pipeline",
+  "name": "Pipeline de Classificação Jurídica Híbrida",
+  "version": "0.1.0",
+  "contract": "mlops-flow-v1",
+  "description": "DAG com pré-processamento jurídico, embeddings versionados, busca semântica, modelos supervisionados, regras de workflow, baixa confiança e LLM controlado.",
+  "nodes": [
+    {
+      "id": "classification_request",
+      "type": "input",
+      "label": "Entrada jurídica",
+      "description": "Documento, andamento ou texto jurídico a classificar.",
+      "position": { "x": 0, "y": 240 },
+      "config": {
+        "targetTypes": ["documento", "andamento"],
+        "requiresProcessContext": true
+      }
+    },
+    {
+      "id": "legal_documents_csv",
+      "type": "data_source",
+      "label": "Histórico CSV",
+      "description": "Histórico jurídico rotulado para treino, avaliação e backtest.",
+      "dataSourceId": "legal_documents_csv",
+      "position": { "x": 230, "y": 90 },
+      "config": {}
+    },
+    {
+      "id": "legal_warehouse_sql",
+      "type": "data_source",
+      "label": "Histórico SQL",
+      "description": "Fonte corporativa futura com processos e feedbacks reais.",
+      "dataSourceId": "legal_warehouse_sql",
+      "position": { "x": 230, "y": 240 },
+      "config": {}
+    },
+    {
+      "id": "legal_preprocess",
+      "type": "preprocess",
+      "label": "Pré-processamento jurídico",
+      "description": "Normaliza texto, remove ruído recorrente, preserva termos jurídicos e calcula hashes.",
+      "position": { "x": 520, "y": 190 },
+      "config": {
+        "ocrWhenNeeded": true,
+        "removeHeadersFooters": true,
+        "languageDetection": true,
+        "maskSensitiveFields": true,
+        "preprocessingVersion": "legal-preprocess-v1"
+      }
+    },
+    {
+      "id": "legal_chunking",
+      "type": "preprocess",
+      "label": "Chunking versionado",
+      "description": "Segmenta documentos longos por páginas e janelas de tokens.",
+      "position": { "x": 790, "y": 90 },
+      "config": {
+        "chunkingVersion": "legal-chunking-v1",
+        "chunkSizeTokens": 600,
+        "chunkOverlapTokens": 80,
+        "preservePageBoundaries": true
+      }
+    },
+    {
+      "id": "legal_structured_features",
+      "type": "feature_transform",
+      "label": "Features estruturadas",
+      "description": "Tribunal, classe processual, rito, etapa atual, páginas, anexos e confiança de OCR.",
+      "position": { "x": 790, "y": 300 },
+      "config": {
+        "featureSetVersion": "legal-feature-set-v1",
+        "leakageChecks": ["no_future_workflow_step", "no_correct_category_as_feature"]
+      }
+    },
+    {
+      "id": "legal_embeddings",
+      "type": "embedding",
+      "capability": "embeddings",
+      "label": "Embeddings jurídicos",
+      "description": "Perfil versionado para documentos, chunks, categorias e etapas. Desabilitado no runtime leve inicial.",
+      "framework": "sentence-transformers",
+      "provider": {
+        "provider": "sentence-transformers",
+        "mode": "external",
+        "enabled": false,
+        "required": false
+      },
+      "dependencies": ["sentence-transformers>=3,<4"],
+      "position": { "x": 1080, "y": 80 },
+      "config": {
+        "enabled": false,
+        "embeddingProfileId": "bge-m3-legal-v1",
+        "provider": "sentence-transformers",
+        "model": "BAAI/bge-m3",
+        "dimension": 1024,
+        "normalization": "l2",
+        "preprocessingVersion": "legal-preprocess-v1",
+        "chunkingVersion": "legal-chunking-v1",
+        "vectorCollections": {
+          "documents": "legal_document_chunks_bge_m3_v1",
+          "categories": "legal_categories_bge_m3_v1",
+          "workflowSteps": "legal_workflow_steps_bge_m3_v1"
+        },
+        "fallback": "skip_semantic_layer"
+      }
+    },
+    {
+      "id": "semantic_retrieval",
+      "type": "retrieval",
+      "capability": "retrieval",
+      "label": "Busca semântica",
+      "description": "Recupera categorias, etapas e documentos similares no banco vetorial.",
+      "provider": {
+        "provider": "qdrant",
+        "mode": "container",
+        "enabled": true,
+        "required": false,
+        "serviceName": "qdrant"
+      },
+      "position": { "x": 1360, "y": 80 },
+      "config": {
+        "vectorStore": "qdrant",
+        "topK": 5,
+        "metric": "cosine",
+        "fallback": "lexical_or_skip_semantic_layer",
+        "outputSignals": ["semanticSimilarity", "similarDocuments", "similarCategories", "similarWorkflowSteps"]
+      }
+    },
+    {
+      "id": "legal_xgboost_candidate",
+      "type": "model",
+      "label": "XGBoost candidato",
+      "description": "Classificador supervisionado para categorias jurídicas.",
+      "algorithm": "xgboost",
+      "framework": "xgboost",
+      "modelRole": "candidate",
+      "task": "multiclass_classification",
+      "dependencies": ["xgboost>=2,<3"],
+      "position": { "x": 1080, "y": 260 },
+      "config": {
+        "objective": "multi:softprob",
+        "trainingBackend": "xgboost",
+        "calibration": "isotonic_or_platt",
+        "topK": [3, 5]
+      }
+    },
+    {
+      "id": "legal_text_baseline",
+      "type": "model",
+      "label": "Baseline textual ativo",
+      "description": "Modelo textual leve para primeira versão e rollback.",
+      "algorithm": "logistic_regression",
+      "framework": "scikit-learn",
+      "modelRole": "active",
+      "task": "multiclass_classification",
+      "position": { "x": 1080, "y": 430 },
+      "config": {
+        "trainingBackend": "scikit-learn",
+        "classWeight": "balanced",
+        "rollbackEligible": true
+      }
+    },
+    {
+      "id": "hybrid_score",
+      "type": "decision",
+      "capability": "decision",
+      "label": "Score híbrido",
+      "description": "Combina probabilidade do classificador, similaridade semântica e regras do workflow.",
+      "position": { "x": 1640, "y": 250 },
+      "config": {
+        "decisionPolicyVersion": "legal-decision-policy-v1",
+        "weights": {
+          "classifierProbability": 0.55,
+          "semanticSimilarity": 0.30,
+          "workflowRules": 0.15
+        },
+        "lowConfidenceThreshold": 0.62,
+        "topMarginThreshold": 0.08
+      }
+    },
+    {
+      "id": "workflow_rules",
+      "type": "python_function",
+      "label": "Regras de workflow",
+      "description": "Bloqueia transições impossíveis e marca baixa confiança para revisão.",
+      "position": { "x": 1920, "y": 250 },
+      "python": {
+        "entrypoint": "run",
+        "codeInline": "def run(input: dict, context: dict) -> dict:\n    categoria = input.get(\"prediction\") or input.get(\"categoria\")\n    confidence = float(input.get(\"confidence\", input.get(\"score\", 0)) or 0)\n    workflow_atual = input.get(\"workflow_step_atual\") or context.get(\"workflow_step_atual\")\n    blocked = []\n    if categoria == \"RECURSO_APELACAO\" and workflow_atual not in {\"sentenca\", \"pos_sentenca\"}:\n        blocked.append(\"recurso_depende_de_sentenca\")\n    if categoria == \"CUMPRIMENTO_SENTENCA\" and workflow_atual not in {\"transito_julgado\", \"pos_sentenca\"}:\n        blocked.append(\"cumprimento_depende_de_titulo\")\n    status = \"blocked\" if blocked else (\"review\" if confidence < 0.62 else \"accepted\")\n    return {\"status\": status, \"blockedRules\": blocked, \"needsHumanReview\": status != \"accepted\", \"category\": categoria, \"confidence\": confidence}\n",
+        "inputSchema": {},
+        "outputSchema": {},
+        "dependencies": [],
+        "networkPolicy": "none",
+        "allowedHosts": [],
+        "mocks": []
+      },
+      "config": {
+        "rulesetVersion": "legal-workflow-rules-v1"
+      }
+    },
+    {
+      "id": "llm_low_confidence_review",
+      "type": "llm",
+      "capability": "llm",
+      "label": "LLM baixa confiança",
+      "description": "Quarta camada opcional para revisar conflitos ou baixa confiança. Desabilitada por padrão.",
+      "provider": {
+        "provider": "openai_compatible",
+        "mode": "external",
+        "enabled": false,
+        "required": false,
+        "connectionRef": "env:LLM_API_KEY"
+      },
+      "position": { "x": 1920, "y": 470 },
+      "python": {
+        "entrypoint": "run",
+        "codeInline": "def run(input: dict, context: dict) -> dict:\n    return {\"used\": False, \"reason\": \"llm_disabled_by_policy\", \"mustNotAutoApply\": True}\n",
+        "inputSchema": {},
+        "outputSchema": {},
+        "dependencies": [],
+        "networkPolicy": "none",
+        "allowedHosts": [],
+        "mocks": []
+      },
+      "config": {
+        "enabled": false,
+        "promptTemplateVersion": "legal-low-confidence-v1",
+        "jsonResponseRequired": true,
+        "maskSensitiveData": true,
+        "triggerPolicy": ["low_confidence", "top_margin_low", "classifier_semantic_conflict"]
+      }
+    },
+    {
+      "id": "classification_response",
+      "type": "output",
+      "label": "Decisão e explicação",
+      "description": "Retorna categoria, etapa, confiança, top candidatos, regras e evidências.",
+      "position": { "x": 2210, "y": 250 },
+      "config": {
+        "includeTopCandidates": true,
+        "includeExplanation": true,
+        "includeModelVersion": true,
+        "includeEmbeddingProfile": true
+      }
+    }
+  ],
+  "edges": [
+    { "from": "classification_request", "to": "legal_preprocess", "mapping": {} },
+    { "from": "legal_documents_csv", "to": "legal_preprocess", "mapping": {} },
+    { "from": "legal_warehouse_sql", "to": "legal_preprocess", "mapping": {} },
+    { "from": "legal_preprocess", "to": "legal_chunking", "mapping": {} },
+    { "from": "legal_preprocess", "to": "legal_structured_features", "mapping": {} },
+    { "from": "legal_chunking", "to": "legal_embeddings", "mapping": {} },
+    { "from": "legal_embeddings", "to": "semantic_retrieval", "mapping": {} },
+    { "from": "legal_structured_features", "to": "legal_xgboost_candidate", "mapping": {} },
+    { "from": "legal_structured_features", "to": "legal_text_baseline", "mapping": {} },
+    { "from": "semantic_retrieval", "to": "hybrid_score", "mapping": {} },
+    { "from": "legal_xgboost_candidate", "to": "hybrid_score", "mapping": {} },
+    { "from": "legal_text_baseline", "to": "hybrid_score", "mapping": {} },
+    { "from": "hybrid_score", "to": "workflow_rules", "mapping": {} },
+    { "from": "hybrid_score", "to": "llm_low_confidence_review", "condition": "low_confidence", "mapping": {} },
+    { "from": "llm_low_confidence_review", "to": "workflow_rules", "mapping": {} },
+    { "from": "workflow_rules", "to": "classification_response", "mapping": {} }
+  ],
+  "subgraphs": [],
+  "visual": {
+    "viewport": { "x": 0, "y": 0, "zoom": 0.75 },
+    "selectedNodeId": "hybrid_score"
+  }
+}

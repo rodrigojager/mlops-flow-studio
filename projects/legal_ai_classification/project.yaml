@@ -1,0 +1,414 @@
+id: legal_ai_classification
+name: Classificação Jurídica com IA Híbrida
+version: 0.1.0
+contract: mlops-flow-v1
+description: Projeto jurídico para classificar documentos e etapas do workflow combinando classificador supervisionado, embeddings, regras e LLM opcional em baixa confiança.
+template:
+  id: legal_classification
+  category: validation_case
+  validationCase: true
+  source: templates/legal_classification
+problem:
+  type: multiclass_classification
+  target: categoria_final
+  classes:
+    - PETICAO_INICIAL
+    - CONTESTACAO
+    - SENTENCA
+    - RECURSO_APELACAO
+    - AGRAVO_INSTRUMENTO
+    - CUMPRIMENTO_SENTENCA
+    - EMBARGOS_DECLARACAO
+    - ACORDO_HOMOLOGACAO
+  classDependencies:
+    - parent: SENTENCA
+      child: RECURSO_APELACAO
+      condition: Recurso de apelação só é válido quando há sentença registrada no workflow.
+    - parent: SENTENCA
+      child: CUMPRIMENTO_SENTENCA
+      condition: Cumprimento de sentença depende de decisão transitada ou título executivo.
+domain:
+  kind: legal_classification
+  legal:
+    processIdentifierField: numero_unico
+    documentTextField: texto
+    categoryTargetField: categoria_final
+    workflowContextField: workflow_step_atual
+    categories:
+      - code: PETICAO_INICIAL
+        name: Petição inicial
+        description: Peça que inaugura a demanda, qualifica partes, narra fatos e apresenta pedidos.
+        target: documento
+        workflowStepCodes:
+          - pre_distribuicao
+      - code: CONTESTACAO
+        name: Contestação
+        description: Defesa do réu com preliminares, impugnação de fatos e pedidos de improcedência.
+        target: documento
+        workflowStepCodes:
+          - citacao
+      - code: SENTENCA
+        name: Sentença
+        description: Decisão judicial que resolve o mérito ou encerra etapa processual relevante.
+        target: documento
+        critical: true
+        workflowStepCodes:
+          - sentenca
+      - code: RECURSO_APELACAO
+        name: Recurso de apelação
+        description: Recurso contra sentença, dependente de decisão anterior no workflow.
+        target: documento
+        critical: true
+        requiresHumanReview: true
+        workflowStepCodes:
+          - sentenca
+          - pos_sentenca
+      - code: AGRAVO_INSTRUMENTO
+        name: Agravo de instrumento
+        description: Recurso contra decisão interlocutória, normalmente com pedido urgente.
+        target: documento
+        critical: true
+        requiresHumanReview: true
+        workflowStepCodes:
+          - decisao_interlocutoria
+      - code: CUMPRIMENTO_SENTENCA
+        name: Cumprimento de sentença
+        description: Pedido executivo decorrente de sentença, acordo ou título judicial.
+        target: documento
+        critical: true
+        workflowStepCodes:
+          - pos_sentenca
+          - transito_julgado
+      - code: EMBARGOS_DECLARACAO
+        name: Embargos de declaração
+        description: Pedido de esclarecimento por omissão, contradição, obscuridade ou erro material.
+        target: documento
+        workflowStepCodes:
+          - sentenca
+      - code: ACORDO_HOMOLOGACAO
+        name: Acordo para homologação
+        description: Petição ou minuta de composição amigável submetida ao juízo.
+        target: documento
+        workflowStepCodes:
+          - audiencia_conciliacao
+    workflowSteps:
+      - code: pre_distribuicao
+        name: Pré-distribuição
+        description: Documento ainda não distribuído ou em preparação inicial.
+        rite: procedimento_comum
+        order: 0
+      - code: citacao
+        name: Citação e defesa
+        description: Fase em que a parte ré é citada e apresenta defesa.
+        rite: procedimento_comum
+        order: 1
+      - code: audiencia_conciliacao
+        name: Audiência ou composição
+        description: Fase de conciliação, acordo ou composição entre as partes.
+        rite: procedimento_comum
+        order: 2
+      - code: instrucao
+        name: Instrução
+        description: Produção de provas e atos preparatórios para julgamento.
+        rite: procedimento_comum
+        order: 3
+      - code: decisao_interlocutoria
+        name: Decisão interlocutória
+        description: Decisão incidental que pode gerar agravo.
+        rite: procedimento_comum
+        order: 4
+      - code: sentenca
+        name: Sentença
+        description: Julgamento ou decisão final de mérito.
+        rite: procedimento_comum
+        order: 5
+      - code: pos_sentenca
+        name: Pós-sentença
+        description: Fase recursal ou de providências posteriores à sentença.
+        rite: procedimento_comum
+        order: 6
+      - code: transito_julgado
+        name: Trânsito em julgado
+        description: Fase posterior ao encerramento de recursos cabíveis.
+        rite: procedimento_comum
+        order: 7
+    workflowTransitions:
+      - from: pre_distribuicao
+        to: citacao
+        rite: procedimento_comum
+        severity: block
+      - from: citacao
+        to: audiencia_conciliacao
+        rite: procedimento_comum
+        severity: review
+      - from: citacao
+        to: instrucao
+        rite: procedimento_comum
+        severity: block
+      - from: audiencia_conciliacao
+        to: instrucao
+        rite: procedimento_comum
+        condition: Sem acordo homologado, o processo segue para instrução.
+        severity: review
+      - from: instrucao
+        to: decisao_interlocutoria
+        rite: procedimento_comum
+        severity: review
+      - from: decisao_interlocutoria
+        to: instrucao
+        rite: procedimento_comum
+        severity: review
+      - from: instrucao
+        to: sentenca
+        rite: procedimento_comum
+        severity: block
+      - from: sentenca
+        to: pos_sentenca
+        rite: procedimento_comum
+        severity: block
+      - from: sentenca
+        to: transito_julgado
+        rite: procedimento_comum
+        condition: Quando não houver recurso pendente.
+        severity: review
+      - from: pos_sentenca
+        to: transito_julgado
+        rite: procedimento_comum
+        severity: review
+    embeddingProfiles:
+      - id: bge-m3-legal-v1
+        provider: sentence-transformers
+        modelName: BAAI/bge-m3
+        modelVersion: "2026-07"
+        dimension: 1024
+        normalization: l2
+        pooling: cls
+        preprocessingVersion: legal-preprocess-v1
+        chunkingVersion: legal-chunking-v1
+        similarityMetric: cosine
+        vectorCollections:
+          documents: legal_document_chunks_bge_m3_v1
+          categories: legal_categories_bge_m3_v1
+          workflowSteps: legal_workflow_steps_bge_m3_v1
+        status: active
+    decisionPolicy:
+      version: legal-decision-policy-v1
+      lowConfidenceThreshold: 0.62
+      topMarginThreshold: 0.08
+      weights:
+        classifierProbability: 0.55
+        semanticSimilarity: 0.30
+        workflowRules: 0.15
+        llmReview: 0
+    llm:
+      enabled: false
+      promptTemplateVersion: legal-low-confidence-v1
+      triggerPolicy:
+        - low_confidence
+        - top_margin_low
+        - classifier_semantic_conflict
+        - workflow_blocked
+      maskSensitiveData: true
+      jsonResponseRequired: true
+      mustNotAutoApply: true
+execution:
+  profile: auto
+  gpu:
+    minVramGb: 4
+    cudaRequired: false
+    fallback: cpu
+metrics:
+  primary: f1_macro
+  secondary:
+    - accuracy
+    - f1_weighted
+    - precision_macro
+    - recall_macro
+    - top_3_accuracy
+    - top_5_accuracy
+    - roc_auc_ovr
+    - pr_auc_macro
+    - brier_score
+    - expected_calibration_error
+    - semantic_recall_at_5
+    - invalid_workflow_transition_rate
+    - low_confidence_rate
+    - human_review_rate
+    - llm_review_rate
+    - latency_p95_ms
+    - drift_score
+dataSources:
+  - id: legal_documents_csv
+    type: csv
+    label: Histórico jurídico rotulado
+    description: Amostra sintética que representa documentos e andamentos já classificados manualmente.
+    sensitive: true
+    csv:
+      path: data/legal_documents.csv
+      delimiter: ","
+      hasHeader: true
+      encoding: utf-8
+    schema:
+      id: string
+      texto: string
+      tribunal: string
+      uf: string
+      classe_processual: string
+      assunto: string
+      rito: string
+      workflow_step_atual: string
+      numero_paginas: integer
+      possui_anexos: boolean
+      ocr_confidence: number
+      categoria_final: string
+    sensitiveFields:
+      - parte_nome
+      - documento_numero
+      - endereco
+  - id: legal_warehouse_sql
+    type: sql
+    label: Histórico jurídico SQL
+    description: Fonte futura para processos, documentos e feedbacks reais.
+    sql:
+      connectionRef: env:LEGAL_DATABASE_URL
+      query: SELECT id, texto, tribunal, uf, classe_processual, assunto, rito, workflow_step_atual, numero_paginas, possui_anexos, ocr_confidence, categoria_final FROM vw_documentos_juridicos_rotulados
+      previewLimit: 50
+    schema: {}
+    sensitiveFields:
+      - parte_nome
+      - documento_numero
+      - endereco
+pipelineRef: pipeline.flow.json
+promotionPolicy:
+  id: legal-classification-promotion-policy
+  mode: manual_approval
+  baseline: active_model
+  rules:
+    - kind: group
+      id: qualidade_juridica_minima
+      label: Qualidade jurídica mínima
+      combinator: all
+      severity: block
+      rules:
+        - kind: metric
+          id: f1_macro_minimo
+          label: F1 macro mínimo
+          left:
+            metric: f1_macro
+            scope: candidate
+            phase: validation
+          operator: gte
+          value: 0.78
+          compareTo:
+            metric: f1_macro
+            scope: active
+            phase: validation
+          neutralBand: 0.01
+          severity: block
+          rationale: O modelo jurídico não deve ser promovido se piorar o equilíbrio entre classes.
+        - kind: metric
+          id: recall_macro_minimo
+          label: Recall macro mínimo
+          left:
+            metric: recall_macro
+            scope: candidate
+            phase: validation
+          operator: gte
+          value: 0.74
+          neutralBand: 0.01
+          severity: block
+          rationale: Categorias críticas não podem desaparecer em classes minoritárias.
+        - kind: metric
+          id: brier_score_calibrado
+          label: Brier score calibrado
+          left:
+            metric: brier_score
+            scope: candidate
+            phase: validation
+          operator: lte
+          value: 0.18
+          neutralBand: 0.01
+          severity: review
+          rationale: A confiança precisa ser calibrada para decidir baixa confiança e revisão humana.
+    - kind: group
+      id: guardrails_operacionais
+      label: Guardrails operacionais
+      combinator: all
+      severity: block
+      rules:
+        - kind: metric
+          id: transicao_invalida_maxima
+          label: Transição inválida máxima
+          left:
+            metric: invalid_workflow_transition_rate
+            scope: runtime
+            phase: runtime
+          operator: lte
+          value: 0.005
+          neutralBand: 0.001
+          severity: block
+          rationale: Modelo com boa métrica offline não pode violar o rito processual.
+        - kind: metric
+          id: latencia_p95_juridica
+          label: Latência p95 jurídica
+          left:
+            metric: latency_p95_ms
+            scope: runtime
+            phase: runtime
+          operator: lte
+          value: 900
+          neutralBand: 50
+          severity: review
+          rationale: Classificação online deve continuar operável mesmo com busca semântica e explicação.
+runtime:
+  apiName: Legal AI Classification API
+  routePrefix: ""
+  persistence:
+    primary: postgres
+    databaseUrlRef: env:DATABASE_URL
+  dashboard:
+    enabled: true
+    pages:
+      - overview
+      - data
+      - models
+      - prediction
+      - monitoring
+      - events
+      - docs
+    highlightedMetrics:
+      - f1_macro
+      - top_3_accuracy
+      - semantic_recall_at_5
+      - invalid_workflow_transition_rate
+      - low_confidence_rate
+      - latency_p95_ms
+  mlflow:
+    enabled: false
+    trackingUriRef: env:MLFLOW_TRACKING_URI
+    experimentName: legal_ai_classification
+    registryEnabled: false
+modelCard:
+  intendedUse: Classificar documentos jurídicos e sugerir etapa de workflow com evidências técnicas, regras aplicadas e revisão humana quando a confiança for baixa.
+  limitations:
+    - Dataset sintético usado apenas para validar contrato e fluxo inicial.
+    - Banco vetorial e LLM estão modelados no DAG, mas devem ser habilitados por ambiente e política.
+    - Decisões de alto risco exigem revisão humana no primeiro corte.
+  monitoring:
+    - prediction_logs
+    - runtime_metrics
+    - drift_basic
+    - feedback_real
+    - low_confidence
+    - workflow_guardrails
+  riskLevel: high
+sensitiveFields:
+  - parte_nome
+  - documento_numero
+  - endereco
+dependencies:
+  - scikit-learn>=1.5,<2
+  - xgboost>=2,<3
+owners:
+  - juridico
+  - mlops

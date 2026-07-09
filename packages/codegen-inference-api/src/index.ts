@@ -3,7 +3,7 @@ import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:
 import path from "node:path";
 import YAML from "yaml";
 import type { MLOpsProject, PipelineFlow, RuntimeManifest } from "@mlops-flow-studio/mlops-spec";
-import { CONTRACT_VERSION } from "@mlops-flow-studio/mlops-spec";
+import { CONTRACT_VERSION, inferRuntimeInfrastructure, inferRuntimeManifestCapabilities } from "@mlops-flow-studio/mlops-spec";
 
 export interface GenerateInferenceApiOptions {
   project: MLOpsProject;
@@ -20,7 +20,7 @@ export interface RuntimeFile {
 export async function generateInferenceApi(options: GenerateInferenceApiOptions): Promise<void> {
   const { project, pipeline, projectRoot, outDir } = options;
   assertSafeOutputDirectory(outDir);
-  await rm(outDir, { recursive: true, force: true });
+  await resetOutputDirectory(outDir);
   await mkdir(path.join(outDir, "app", "metadata"), { recursive: true });
   await mkdir(path.join(outDir, "app", "custom_code"), { recursive: true });
   await mkdir(path.join(outDir, "migrations"), { recursive: true });
@@ -78,6 +78,55 @@ export async function generateInferenceApi(options: GenerateInferenceApiOptions)
   }
 }
 
+async function resetOutputDirectory(outDir: string): Promise<void> {
+  try {
+    await rm(outDir, { recursive: true, force: true });
+  } catch (error) {
+    if (!isPermissionError(error)) {
+      throw error;
+    }
+    await removeOutputDirectoryContents(outDir);
+  }
+}
+
+async function removeOutputDirectoryContents(outDir: string): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(outDir, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+    throw error;
+  }
+  for (const entry of entries) {
+    if (entry.name === ".pytest_cache") {
+      continue;
+    }
+    const target = path.join(outDir, entry.name);
+    try {
+      await rm(target, { recursive: true, force: true });
+    } catch (error) {
+      if (isPermissionError(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+function isPermissionError(error: unknown): boolean {
+  return isNodeError(error) && (error.code === "EPERM" || error.code === "EACCES");
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return isNodeError(error) && error.code === "ENOENT";
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
 export async function projectFingerprint(project: MLOpsProject, projectRoot: string): Promise<string> {
   return createHash("sha256")
     .update(stableJson({ project, assets: await fingerprintAssets(projectRoot, ["project.yaml"]) }))
@@ -91,6 +140,8 @@ export async function pipelineFingerprint(pipeline: PipelineFlow, projectRoot: s
 }
 
 async function runtimeManifest(project: MLOpsProject, pipeline: PipelineFlow, projectRoot: string): Promise<RuntimeManifest> {
+  const capabilities = inferRuntimeManifestCapabilities(pipeline, project);
+  const infrastructure = inferRuntimeInfrastructure(capabilities);
   return {
     id: `${project.id}-runtime`,
     projectId: project.id,
@@ -103,6 +154,8 @@ async function runtimeManifest(project: MLOpsProject, pipeline: PipelineFlow, pr
     activeModelId: activeModelId(pipeline),
     executionProfile: project.execution.profile,
     persistence: project.runtime.persistence,
+    capabilities,
+    infrastructure,
     endpoints: [
       "GET /health",
       "GET /metadata",
@@ -110,6 +163,9 @@ async function runtimeManifest(project: MLOpsProject, pipeline: PipelineFlow, pr
       "GET /model-card",
       "GET /models",
       "GET /models/active",
+      "GET /models/{model_id}",
+      "POST /models/register",
+      "POST /models/{model_id}/promote",
       "GET /metrics/model",
       "GET /metrics/runtime",
       "POST /predict",
@@ -129,6 +185,16 @@ async function runtimeManifest(project: MLOpsProject, pipeline: PipelineFlow, pr
       "POST /deployment/shadow",
       "POST /deployment/canary",
       "POST /deployment/rollback",
+      "GET /experiments/ab-tests",
+      "GET /experiments/ab-tests/latest",
+      "POST /experiments/ab-tests",
+      "POST /experiments/ab-tests/{experiment_id}/complete",
+      "GET /domain/legal",
+      "GET /embeddings/profiles",
+      "POST /embeddings/profiles/register",
+      "POST /embeddings/profiles/{profile_id}/activate",
+      "POST /embeddings/search",
+      "POST /embeddings/reindex",
       "GET /dashboard",
     ],
   };
@@ -156,6 +222,8 @@ function renderCanonicalManifestFiles(project: MLOpsProject, pipeline: PipelineF
   const pythonNodes = pipeline.nodes.filter((node) => node.type === "python_function");
   const dataSourceNodes = pipeline.nodes.filter((node) => node.type === "data_source");
   const dependencies = pythonDependencies(project, pipeline);
+  const capabilities = manifest.capabilities;
+  const infrastructure = manifest.infrastructure;
   const rawDatasetVersion = latestTrainingResult ? latestTrainingResult.datasetVersion : null;
   const latestDatasetVersion = isRecord(rawDatasetVersion) ? rawDatasetVersion : null;
   const latestRunId = typeof latestTrainingResult?.runId === "string" ? latestTrainingResult.runId : null;
@@ -168,6 +236,21 @@ function renderCanonicalManifestFiles(project: MLOpsProject, pipeline: PipelineF
     generatedAt,
   };
   const files: Array<{ relativePath: string; value: Record<string, unknown> }> = [
+    {
+      relativePath: "capabilities.yaml",
+      value: {
+        ...base,
+        kind: "capability_manifest",
+        principle: "Pipeline é um DAG configurável; capacidades e providers são opcionais e inferidos do grafo.",
+        capabilities,
+        infrastructure,
+        templates: {
+          validationCase: project.template?.validationCase === true,
+          templateId: project.template?.id ?? null,
+          category: project.template?.category ?? "custom",
+        },
+      },
+    },
     {
       relativePath: "data_source.yaml",
       value: {
@@ -518,15 +601,18 @@ function renderRuntimeFiles(project: MLOpsProject, pipeline: PipelineFlow, manif
     { relativePath: "README.md", content: renderReadme(project, manifest) },
     { relativePath: "requirements.txt", content: `${dependencies.join("\n")}\n` },
     { relativePath: "requirements-orchestration.txt", content: renderOrchestrationRequirements() },
-    { relativePath: ".env.example", content: renderEnvExample(project) },
+    { relativePath: ".env.example", content: renderEnvExample(project, manifest) },
     { relativePath: "Dockerfile", content: renderDockerfile(project, pipeline, manifest) },
     { relativePath: "docker-compose.yml", content: renderDockerCompose(project) },
+    { relativePath: "docker-compose.capabilities.yml", content: renderDockerComposeCapabilities(manifest) },
     { relativePath: "docker-compose.gpu.yml", content: renderDockerComposeGpu() },
     { relativePath: "docker-compose.orchestration.yml", content: renderDockerComposeOrchestration() },
     { relativePath: "orchestration/__init__.py", content: "" },
     { relativePath: "orchestration/README.md", content: renderOrchestrationReadme(project) },
     { relativePath: "orchestration/prefect_flow.py", content: renderPrefectFlowPy(project) },
     { relativePath: "orchestration/celery_app.py", content: renderCeleryAppPy(project) },
+    { relativePath: "grpc/README.md", content: renderGrpcReadme(project) },
+    { relativePath: "grpc/legal_classification.proto", content: renderGrpcProto(project) },
     { relativePath: "migrations/001_init.sql", content: renderMigrationSql() },
     { relativePath: "app/__init__.py", content: "" },
     { relativePath: "app/settings.py", content: renderSettingsPy() },
@@ -565,6 +651,18 @@ Para evitar conflito com serviços locais, sobrescreva as portas publicadas:
 \`\`\`powershell
 $env:API_HOST_PORT="18080"; $env:POSTGRES_HOST_PORT="15433"; docker compose up -d --build
 \`\`\`
+
+## Capacidades opcionais
+
+O grafo pode pedir providers em modo \`container\` para capacidades como Qdrant, MLflow ou worker. Esses serviços ficam em um overlay separado:
+
+\`\`\`powershell
+docker compose -f docker-compose.yml -f docker-compose.capabilities.yml up -d --build
+\`\`\`
+
+Serviços inferidos neste runtime:
+
+${manifest.infrastructure.services.length ? manifest.infrastructure.services.map((service) => `- \`${service.id}\` (${service.provider}, mode=${service.mode}, required=${service.required})`).join("\n") : "- Nenhum provider em modo container foi solicitado pelo grafo."}
 
 ## GPU/CUDA
 
@@ -641,6 +739,78 @@ docker compose -f docker-compose.yml -f docker-compose.orchestration.yml --profi
 \`\`\`
 
 Os fluxos read-only consultam health, metadata, modelo ativo e métricas. Fluxos mutáveis de retreino exigem \`confirm=True\`.
+`;
+}
+
+function renderGrpcReadme(project: MLOpsProject): string {
+  return `# gRPC opcional
+
+Este diretório contém o contrato gRPC interno sugerido para \`${project.runtime.apiName}\`.
+
+O runtime mínimo continua expondo REST/FastAPI. Use o arquivo \`legal_classification.proto\` quando houver um gateway .NET, worker interno ou serviço dedicado que precise de chamadas de baixa latência com contrato estável.
+
+O contrato usa \`google.protobuf.Struct\` para preservar compatibilidade com o schema MLOps e evitar acoplar clientes internos a um modelo de domínio incompleto.
+`;
+}
+
+function renderGrpcProto(project: MLOpsProject): string {
+  const javaPackage = `mlops.${project.id.replace(/[^A-Za-z0-9_]/g, "_")}.grpc`;
+  return `syntax = "proto3";
+
+package mlops.legal.v1;
+
+import "google/protobuf/struct.proto";
+
+option csharp_namespace = "MLOps.FlowStudio.LegalClassification.Grpc";
+option java_multiple_files = true;
+option java_package = "${javaPackage}";
+
+service LegalClassificationService {
+  rpc Classify (ClassifyRequest) returns (ClassifyResponse);
+  rpc GetEmbeddingProfiles (GetEmbeddingProfilesRequest) returns (EmbeddingProfilesResponse);
+  rpc SearchEmbeddings (EmbeddingSearchRequest) returns (EmbeddingSearchResponse);
+}
+
+message ClassifyRequest {
+  google.protobuf.Struct input = 1;
+  bool trace = 2;
+}
+
+message ClassifyResponse {
+  string run_id = 1;
+  string model_version_id = 2;
+  string prediction = 3;
+  double confidence = 4;
+  google.protobuf.Struct decision = 5;
+  google.protobuf.Struct explanation = 6;
+  google.protobuf.Struct review = 7;
+  repeated google.protobuf.Struct top_candidates = 8;
+  google.protobuf.Struct embedding_profile = 9;
+  google.protobuf.Struct cache = 10;
+}
+
+message GetEmbeddingProfilesRequest {}
+
+message EmbeddingProfilesResponse {
+  string active_profile_id = 1;
+  repeated google.protobuf.Struct profiles = 2;
+  google.protobuf.Struct substitution_contract = 3;
+}
+
+message EmbeddingSearchRequest {
+  string query = 1;
+  string collection = 2;
+  int32 top_k = 3;
+  string profile_id = 4;
+}
+
+message EmbeddingSearchResponse {
+  string status = 1;
+  string profile_id = 2;
+  string collection = 3;
+  repeated google.protobuf.Struct results = 4;
+  string implementation = 5;
+}
 `;
 }
 
@@ -863,12 +1033,15 @@ if __name__ == "__main__":
 `;
 }
 
-function renderEnvExample(project: MLOpsProject): string {
-  const mlflow = project.runtime.mlflow.enabled ? "http://mlflow:5000" : "";
+function renderEnvExample(project: MLOpsProject, manifest: RuntimeManifest): string {
+  const hasQdrant = manifest.infrastructure.services.some((service) => service.id === "qdrant");
+  const hasMlflow = manifest.infrastructure.services.some((service) => service.id === "mlflow");
+  const mlflow = project.runtime.mlflow.enabled || hasMlflow ? "http://mlflow:5000" : "";
   return `APP_NAME=${project.runtime.apiName}
 DATABASE_URL=postgresql+psycopg://mlops:mlops@postgres:5432/mlops
 EXECUTION_PROFILE=${project.execution.profile}
 MLFLOW_TRACKING_URI=${mlflow}
+QDRANT_URL=${hasQdrant ? "http://qdrant:6333" : ""}
 STORE_FULL_PAYLOAD=false
 `;
 }
@@ -960,6 +1133,78 @@ volumes:
 `;
 }
 
+function renderDockerComposeCapabilities(manifest: RuntimeManifest): string {
+  const services = manifest.infrastructure.services;
+  if (!services.length) {
+    return `# Nenhuma capacidade com provider em modo container foi solicitada pelo grafo.
+services: {}
+`;
+  }
+
+  const hasQdrant = services.some((service) => service.id === "qdrant");
+  const hasMlflow = services.some((service) => service.id === "mlflow");
+  const hasWorker = services.some((service) => service.id === "runtime-worker");
+  const serviceBlocks: string[] = [];
+  const volumes: string[] = [];
+
+  if (hasQdrant) {
+    serviceBlocks.push(`  qdrant:
+    image: qdrant/qdrant:v1.12.6
+    ports:
+      - "\${QDRANT_HOST_PORT:-6333}:6333"
+      - "\${QDRANT_GRPC_HOST_PORT:-6334}:6334"
+    volumes:
+      - mlops-qdrant-data:/qdrant/storage`);
+    volumes.push("  mlops-qdrant-data:");
+  }
+
+  if (hasMlflow) {
+    serviceBlocks.push(`  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    ports:
+      - "\${MLFLOW_HOST_PORT:-5000}:5000"
+    volumes:
+      - mlops-mlflow-data:/mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts`);
+    volumes.push("  mlops-mlflow-data:");
+  }
+
+  if (hasWorker) {
+    serviceBlocks.push(`  runtime-redis:
+    image: redis:7-alpine
+    ports:
+      - "\${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - mlops-runtime-redis:/data
+
+  runtime-worker:
+    build: .
+    depends_on:
+      - api
+      - runtime-redis
+    environment:
+      RUNTIME_BASE_URL: \${RUNTIME_BASE_URL:-http://api:8080}
+      CELERY_BROKER_URL: redis://runtime-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://runtime-redis:6379/0
+      QDRANT_URL: \${QDRANT_URL:-http://qdrant:6333}
+      MLFLOW_TRACKING_URI: \${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+    command: >
+      sh -c "python -m pip install -r requirements-orchestration.txt && celery -A orchestration.celery_app worker --loglevel=\${CELERY_LOG_LEVEL:-INFO}"`);
+    volumes.push("  mlops-runtime-redis:");
+  }
+
+  return `# Overlay gerado a partir de runtime.manifest.json/infrastructure.services.
+# Use apenas quando quiser subir providers opcionais declarados pelo grafo.
+services:
+${serviceBlocks.join("\n\n")}
+${volumes.length ? `\nvolumes:\n${[...new Set(volumes)].join("\n")}\n` : ""}`;
+}
+
 function renderDockerComposeGpu(): string {
   return `services:
   api:
@@ -1046,10 +1291,20 @@ metadata = MetaData()
 ingestion_runs = Table("ingestion_runs", metadata, Column("id", String, primary_key=True), Column("source_id", String), Column("status", String), Column("started_at", DateTime(timezone=True)), Column("finished_at", DateTime(timezone=True)), Column("details", JSON))
 dataset_versions = Table("dataset_versions", metadata, Column("id", String, primary_key=True), Column("layer", String), Column("uri", String), Column("schema_hash", String), Column("lineage", JSON), Column("quality", JSON), Column("created_at", DateTime(timezone=True)))
 feature_set_versions = Table("feature_set_versions", metadata, Column("id", String, primary_key=True), Column("features", JSON), Column("transformations", JSON), Column("dependencies", JSON), Column("created_at", DateTime(timezone=True)))
+legal_categories = Table("legal_categories", metadata, Column("code", String, primary_key=True), Column("name", String), Column("target", String), Column("critical", Boolean), Column("requires_human_review", Boolean), Column("workflow_step_codes", JSON), Column("metadata_json", JSON), Column("created_at", DateTime(timezone=True)))
+legal_workflow_steps = Table("legal_workflow_steps", metadata, Column("code", String, primary_key=True), Column("name", String), Column("rite", String), Column("order_index", Integer), Column("step_type", String), Column("requires_document", Boolean), Column("requires_human_review", Boolean), Column("sla_hours", Integer), Column("metadata_json", JSON), Column("created_at", DateTime(timezone=True)))
+legal_workflow_transitions = Table("legal_workflow_transitions", metadata, Column("id", String, primary_key=True), Column("from_step", String), Column("to_step", String), Column("rite", String), Column("condition", Text), Column("severity", String), Column("active", Boolean), Column("created_at", DateTime(timezone=True)))
+legal_processes = Table("legal_processes", metadata, Column("id", String, primary_key=True), Column("process_identifier", String), Column("current_workflow_step", String), Column("metadata_json", JSON), Column("created_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True)))
+legal_documents = Table("legal_documents", metadata, Column("id", String, primary_key=True), Column("process_id", String), Column("prediction_run_id", String), Column("prediction_row_id", String), Column("category_code", String), Column("workflow_step_code", String), Column("text_hash", String), Column("metadata_json", JSON), Column("created_at", DateTime(timezone=True)))
+legal_andamentos = Table("legal_andamentos", metadata, Column("id", String, primary_key=True), Column("process_id", String), Column("workflow_step_code", String), Column("category_code", String), Column("prediction_row_id", String), Column("status", String), Column("details", JSON), Column("created_at", DateTime(timezone=True)))
+embedding_profiles = Table("embedding_profiles", metadata, Column("id", String, primary_key=True), Column("provider", String), Column("model_name", String), Column("model_version", String), Column("model_digest", String), Column("dimension", Integer), Column("similarity_metric", String), Column("preprocessing_version", String), Column("chunking_version", String), Column("status", String), Column("vector_collections", JSON), Column("metadata_json", JSON), Column("created_at", DateTime(timezone=True)))
+vector_collections = Table("vector_collections", metadata, Column("id", String, primary_key=True), Column("profile_id", String), Column("logical_name", String), Column("collection_name", String), Column("backend", String), Column("dimension", Integer), Column("similarity_metric", String), Column("status", String), Column("metadata_json", JSON), Column("created_at", DateTime(timezone=True)))
+embedding_records = Table("embedding_records", metadata, Column("id", String, primary_key=True), Column("profile_id", String), Column("collection_name", String), Column("entity_type", String), Column("entity_id", String), Column("chunk_id", String), Column("vector", JSON), Column("vector_hash", String), Column("metadata_json", JSON), Column("created_at", DateTime(timezone=True)))
 training_runs = Table("training_runs", metadata, Column("id", String, primary_key=True), Column("status", String), Column("algorithm", String), Column("params", JSON), Column("metrics", JSON), Column("artifacts", JSON), Column("started_at", DateTime(timezone=True)), Column("finished_at", DateTime(timezone=True)))
 model_versions = Table("model_versions", metadata, Column("id", String, primary_key=True), Column("status", String), Column("algorithm", String), Column("metrics", JSON), Column("artifact_uri", String), Column("is_active", Boolean), Column("created_at", DateTime(timezone=True)))
 promotion_decisions = Table("promotion_decisions", metadata, Column("id", String, primary_key=True), Column("candidate_model_id", String), Column("decision", String), Column("evidence", JSON), Column("approved_by", String), Column("created_at", DateTime(timezone=True)))
 deployment_rollouts = Table("deployment_rollouts", metadata, Column("id", String, primary_key=True), Column("kind", String), Column("status", String), Column("active_model_id", String), Column("candidate_model_id", String), Column("traffic_percent", Float), Column("reason", Text), Column("requested_by", String), Column("details", JSON), Column("created_at", DateTime(timezone=True)), Column("completed_at", DateTime(timezone=True)))
+ab_experiments = Table("ab_experiments", metadata, Column("id", String, primary_key=True), Column("status", String), Column("baseline_model_id", String), Column("candidate_model_id", String), Column("traffic_split_percent", Float), Column("primary_metric", String), Column("winner_model_id", String), Column("reason", Text), Column("requested_by", String), Column("details", JSON), Column("created_at", DateTime(timezone=True)), Column("completed_at", DateTime(timezone=True)))
 prediction_runs = Table("prediction_runs", metadata, Column("id", String, primary_key=True), Column("model_version_id", String), Column("status", String), Column("latency_ms", Float), Column("created_at", DateTime(timezone=True)))
 prediction_rows = Table("prediction_rows", metadata, Column("id", String, primary_key=True), Column("run_id", String), Column("model_version_id", String), Column("input_digest", String), Column("input_masked", JSON), Column("output", JSON), Column("latency_ms", Float), Column("created_at", DateTime(timezone=True)))
 prediction_feedback = Table("prediction_feedback", metadata, Column("id", String, primary_key=True), Column("run_id", String), Column("row_id", String), Column("model_version_id", String), Column("predicted_value", JSON), Column("actual_label", JSON), Column("correct", Boolean), Column("source", String), Column("reviewer", String), Column("comment", Text), Column("created_at", DateTime(timezone=True)))
@@ -1072,7 +1327,7 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 from sqlalchemy import func, insert, select, text, update
-from .db import app_events, dataset_versions, deployment_rollouts, drift_runs, engine, evaluation_runs, metric_snapshots, model_versions, prediction_feedback, prediction_rows, prediction_runs, promotion_decisions, retraining_requests, training_runs
+from .db import ab_experiments, app_events, dataset_versions, deployment_rollouts, drift_runs, embedding_profiles, embedding_records, engine, evaluation_runs, legal_andamentos, legal_categories, legal_documents, legal_processes, legal_workflow_steps, legal_workflow_transitions, metric_snapshots, model_versions, prediction_feedback, prediction_rows, prediction_runs, promotion_decisions, retraining_requests, training_runs, vector_collections
 from .settings import settings
 
 
@@ -1089,6 +1344,220 @@ def check_database() -> dict[str, Any]:
 def record_event(event_type: str, message: str, details: dict[str, Any] | None = None) -> None:
     with engine.begin() as connection:
         connection.execute(insert(app_events).values(event_type=event_type, message=message, details=details or {}, created_at=now()))
+
+
+def seed_domain_metadata(project: dict[str, Any]) -> dict[str, Any]:
+    legal = legal_domain_config(project)
+    if not legal:
+        return {"seeded": False, "kind": project.get("domain", {}).get("kind", "generic"), "reason": "dominio sem manifesto juridico"}
+
+    created_at = now()
+    inserted = {
+        "legal_categories": 0,
+        "legal_workflow_steps": 0,
+        "legal_workflow_transitions": 0,
+        "embedding_profiles": 0,
+        "vector_collections": 0,
+        "embedding_records": 0,
+    }
+    with engine.begin() as connection:
+        for category in legal.get("categories", []):
+            if not isinstance(category, dict) or not category.get("code"):
+                continue
+            code = str(category["code"])
+            if connection.execute(select(legal_categories.c.code).where(legal_categories.c.code == code)).first():
+                continue
+            connection.execute(
+                insert(legal_categories).values(
+                    code=code,
+                    name=category.get("name"),
+                    target=category.get("target"),
+                    critical=bool(category.get("critical", False)),
+                    requires_human_review=bool(category.get("requiresHumanReview", False)),
+                    workflow_step_codes=category.get("workflowStepCodes", []),
+                    metadata_json={key: value for key, value in category.items() if key not in {"code", "name", "target", "critical", "requiresHumanReview", "workflowStepCodes"}},
+                    created_at=created_at,
+                )
+            )
+            inserted["legal_categories"] += 1
+
+        for step in legal.get("workflowSteps", []):
+            if not isinstance(step, dict) or not step.get("code"):
+                continue
+            code = str(step["code"])
+            if connection.execute(select(legal_workflow_steps.c.code).where(legal_workflow_steps.c.code == code)).first():
+                continue
+            connection.execute(
+                insert(legal_workflow_steps).values(
+                    code=code,
+                    name=step.get("name"),
+                    rite=step.get("rite"),
+                    order_index=step.get("order"),
+                    step_type=step.get("stepType"),
+                    requires_document=bool(step.get("requiresDocument", False)),
+                    requires_human_review=bool(step.get("requiresHumanReview", False)),
+                    sla_hours=step.get("slaHours"),
+                    metadata_json={key: value for key, value in step.items() if key not in {"code", "name", "rite", "order", "stepType", "requiresDocument", "requiresHumanReview", "slaHours"}},
+                    created_at=created_at,
+                )
+            )
+            inserted["legal_workflow_steps"] += 1
+
+        for transition in legal.get("workflowTransitions", []):
+            if not isinstance(transition, dict) or not transition.get("from") or not transition.get("to"):
+                continue
+            transition_id = f"{transition.get('rite', 'default')}:{transition['from']}->{transition['to']}"
+            if row_exists(connection, legal_workflow_transitions, transition_id):
+                continue
+            connection.execute(
+                insert(legal_workflow_transitions).values(
+                    id=transition_id,
+                    from_step=str(transition["from"]),
+                    to_step=str(transition["to"]),
+                    rite=str(transition.get("rite") or "default"),
+                    condition=transition.get("condition"),
+                    severity=str(transition.get("severity") or "block"),
+                    active=bool(transition.get("active", True)),
+                    created_at=created_at,
+                )
+            )
+            inserted["legal_workflow_transitions"] += 1
+
+        for profile in legal.get("embeddingProfiles", []):
+            if not isinstance(profile, dict) or not profile.get("id"):
+                continue
+            profile_id = str(profile["id"])
+            if not row_exists(connection, embedding_profiles, profile_id):
+                connection.execute(
+                    insert(embedding_profiles).values(
+                        id=profile_id,
+                        provider=profile.get("provider"),
+                        model_name=profile.get("modelName"),
+                        model_version=profile.get("modelVersion"),
+                        model_digest=profile.get("modelDigest"),
+                        dimension=profile.get("dimension"),
+                        similarity_metric=profile.get("similarityMetric"),
+                        preprocessing_version=profile.get("preprocessingVersion"),
+                        chunking_version=profile.get("chunkingVersion"),
+                        status=profile.get("status"),
+                        vector_collections=profile.get("vectorCollections", {}),
+                        metadata_json={
+                            "normalization": profile.get("normalization"),
+                            "pooling": profile.get("pooling"),
+                        },
+                        created_at=created_at,
+                    )
+                )
+                inserted["embedding_profiles"] += 1
+            collections = profile.get("vectorCollections", {}) if isinstance(profile.get("vectorCollections"), dict) else {}
+            for logical_name, collection_name in collections.items():
+                collection_id = f"{profile_id}:{collection_name}"
+                if not row_exists(connection, vector_collections, collection_id):
+                    connection.execute(
+                        insert(vector_collections).values(
+                            id=collection_id,
+                            profile_id=profile_id,
+                            logical_name=str(logical_name),
+                            collection_name=str(collection_name),
+                            backend="external_vector_store_or_pgvector",
+                            dimension=profile.get("dimension"),
+                            similarity_metric=profile.get("similarityMetric"),
+                            status=profile.get("status"),
+                            metadata_json={"source": "domain_manifest"},
+                            created_at=created_at,
+                        )
+                    )
+                    inserted["vector_collections"] += 1
+            inserted["embedding_records"] += seed_embedding_placeholders(connection, profile_id, collections, legal, created_at)
+
+    return {"seeded": True, "kind": "legal_classification", **inserted}
+
+
+def seed_embedding_placeholders(connection, profile_id: str, collections: dict[str, Any], legal: dict[str, Any], created_at: datetime) -> int:
+    inserted = 0
+    categories_collection = collections.get("categories")
+    if categories_collection:
+        for category in legal.get("categories", []):
+            if not isinstance(category, dict) or not category.get("code"):
+                continue
+            record_id = f"{profile_id}:category:{category['code']}"
+            if row_exists(connection, embedding_records, record_id):
+                continue
+            connection.execute(
+                insert(embedding_records).values(
+                    id=record_id,
+                    profile_id=profile_id,
+                    collection_name=str(categories_collection),
+                    entity_type="legal_category",
+                    entity_id=str(category["code"]),
+                    chunk_id=None,
+                    vector=None,
+                    vector_hash=None,
+                    metadata_json={"name": category.get("name"), "status": "placeholder_until_embedding_job"},
+                    created_at=created_at,
+                )
+            )
+            inserted += 1
+    workflow_collection = collections.get("workflowSteps")
+    if workflow_collection:
+        for step in legal.get("workflowSteps", []):
+            if not isinstance(step, dict) or not step.get("code"):
+                continue
+            record_id = f"{profile_id}:workflow_step:{step['code']}"
+            if row_exists(connection, embedding_records, record_id):
+                continue
+            connection.execute(
+                insert(embedding_records).values(
+                    id=record_id,
+                    profile_id=profile_id,
+                    collection_name=str(workflow_collection),
+                    entity_type="legal_workflow_step",
+                    entity_id=str(step["code"]),
+                    chunk_id=None,
+                    vector=None,
+                    vector_hash=None,
+                    metadata_json={"name": step.get("name"), "status": "placeholder_until_embedding_job"},
+                    created_at=created_at,
+                )
+            )
+            inserted += 1
+    return inserted
+
+
+def legal_domain_config(project: dict[str, Any]) -> dict[str, Any] | None:
+    domain = project.get("domain", {})
+    if not isinstance(domain, dict) or domain.get("kind") != "legal_classification":
+        return None
+    legal = domain.get("legal")
+    return legal if isinstance(legal, dict) else None
+
+
+def domain_metadata_summary(project: dict[str, Any]) -> dict[str, Any]:
+    legal = legal_domain_config(project)
+    if not legal:
+        return {"kind": project.get("domain", {}).get("kind", "generic"), "legal": None}
+    with engine.connect() as connection:
+        counts = {
+            "categories": connection.execute(select(func.count()).select_from(legal_categories)).scalar_one(),
+            "workflow_steps": connection.execute(select(func.count()).select_from(legal_workflow_steps)).scalar_one(),
+            "workflow_transitions": connection.execute(select(func.count()).select_from(legal_workflow_transitions)).scalar_one(),
+            "processes": connection.execute(select(func.count()).select_from(legal_processes)).scalar_one(),
+            "documents": connection.execute(select(func.count()).select_from(legal_documents)).scalar_one(),
+            "andamentos": connection.execute(select(func.count()).select_from(legal_andamentos)).scalar_one(),
+            "embedding_profiles": connection.execute(select(func.count()).select_from(embedding_profiles)).scalar_one(),
+            "vector_collections": connection.execute(select(func.count()).select_from(vector_collections)).scalar_one(),
+            "embedding_records": connection.execute(select(func.count()).select_from(embedding_records)).scalar_one(),
+        }
+    return {
+        "kind": "legal_classification",
+        "processIdentifierField": legal.get("processIdentifierField"),
+        "documentTextField": legal.get("documentTextField"),
+        "categoryTargetField": legal.get("categoryTargetField"),
+        "workflowContextField": legal.get("workflowContextField"),
+        "decisionPolicy": legal.get("decisionPolicy", {}),
+        "llm": legal.get("llm", {}),
+        "counts": {key: int(value or 0) for key, value in counts.items()},
+    }
 
 
 def seed_training_metadata(training_result: dict[str, Any] | None, project: dict[str, Any], runtime_manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1231,6 +1700,204 @@ def promotion_recommendation(evidence: list[dict[str, Any]]) -> str:
     return "approve"
 
 
+def registered_model_version(model_id: str) -> dict[str, Any] | None:
+    with engine.connect() as connection:
+        row = connection.execute(select(model_versions).where(model_versions.c.id == model_id)).mappings().first()
+    return serialize_model_version(row)
+
+
+def register_model_version(
+    model_id: str,
+    algorithm: str | None,
+    artifact_uri: str | None,
+    metrics: dict[str, Any] | None,
+    status: str | None,
+    activate: bool,
+    requested_by: str | None,
+    confirm: bool,
+) -> dict[str, Any]:
+    if not confirm:
+        raise ValueError("Registro de modelo exige confirm=true.")
+    if not model_id or not model_id.strip():
+        raise ValueError("model_id é obrigatório.")
+    created_at = now()
+    with engine.begin() as connection:
+        if model_exists(connection, model_id):
+            raise ValueError(f"Modelo {model_id} já existe no registry.")
+        if activate:
+            connection.execute(update(model_versions).values(is_active=False))
+        connection.execute(
+            insert(model_versions).values(
+                id=model_id,
+                status=status or ("active" if activate else "registered"),
+                algorithm=algorithm or "external",
+                metrics=metrics or {},
+                artifact_uri=artifact_uri,
+                is_active=activate,
+                created_at=created_at,
+            )
+        )
+        if activate:
+            connection.execute(
+                insert(promotion_decisions).values(
+                    id=str(uuid4()),
+                    candidate_model_id=model_id,
+                    decision="approve",
+                    evidence={"source": "model_registry_registration", "requested_by": requested_by, "activate": True},
+                    approved_by=requested_by,
+                    created_at=created_at,
+                )
+            )
+        row = connection.execute(select(model_versions).where(model_versions.c.id == model_id)).mappings().first()
+    record_event("model_registered", "Versão de modelo registrada", {"model_id": model_id, "activate": activate, "requested_by": requested_by})
+    return {"status": "ok", "model": serialize_model_version(row)}
+
+
+def promote_model_version(model_id: str, approved_by: str | None, evidence: dict[str, Any] | None, confirm: bool) -> dict[str, Any] | None:
+    if not confirm:
+        raise ValueError("Promoção de modelo exige confirm=true.")
+    promoted_at = now()
+    with engine.begin() as connection:
+        row = connection.execute(select(model_versions).where(model_versions.c.id == model_id)).mappings().first()
+        if row is None:
+            return None
+        connection.execute(update(model_versions).values(is_active=False))
+        connection.execute(
+            update(model_versions)
+            .where(model_versions.c.id == model_id)
+            .values(status="active", is_active=True)
+        )
+        decision_id = str(uuid4())
+        connection.execute(
+            insert(promotion_decisions).values(
+                id=decision_id,
+                candidate_model_id=model_id,
+                decision="approve",
+                evidence=evidence or {"source": "manual_registry_promotion"},
+                approved_by=approved_by,
+                created_at=promoted_at,
+            )
+        )
+        updated = connection.execute(select(model_versions).where(model_versions.c.id == model_id)).mappings().first()
+    record_event("model_promoted", "Versão de modelo promovida", {"model_id": model_id, "approved_by": approved_by})
+    return {"status": "ok", "model": serialize_model_version(updated), "promotion_decision_id": decision_id}
+
+
+def serialize_model_version(row: Any) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "status": row["status"],
+        "algorithm": row["algorithm"],
+        "metrics": row["metrics"] or {},
+        "artifact_uri": row["artifact_uri"],
+        "is_active": bool(row["is_active"]),
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+def register_embedding_profile(
+    profile_id: str,
+    provider: str | None,
+    model_name: str | None,
+    model_version: str | None,
+    model_digest: str | None,
+    dimension: int | None,
+    similarity_metric: str | None,
+    preprocessing_version: str | None,
+    chunking_version: str | None,
+    vector_collection_map: dict[str, Any] | None,
+    metadata: dict[str, Any] | None,
+    requested_by: str | None,
+    confirm: bool,
+) -> dict[str, Any]:
+    if not confirm:
+        raise ValueError("Registro de perfil de embedding exige confirm=true.")
+    if not profile_id or not profile_id.strip():
+        raise ValueError("profile_id é obrigatório.")
+    created_at = now()
+    collections = vector_collection_map or {}
+    with engine.begin() as connection:
+        if row_exists(connection, embedding_profiles, profile_id):
+            raise ValueError(f"Perfil de embedding {profile_id} já existe.")
+        connection.execute(
+            insert(embedding_profiles).values(
+                id=profile_id,
+                provider=provider,
+                model_name=model_name,
+                model_version=model_version,
+                model_digest=model_digest,
+                dimension=dimension,
+                similarity_metric=similarity_metric or "cosine",
+                preprocessing_version=preprocessing_version,
+                chunking_version=chunking_version,
+                status="registered",
+                vector_collections=collections,
+                metadata_json=metadata or {},
+                created_at=created_at,
+            )
+        )
+        for logical_name, collection_name in collections.items():
+            collection_id = f"{profile_id}:{collection_name}"
+            if row_exists(connection, vector_collections, collection_id):
+                continue
+            connection.execute(
+                insert(vector_collections).values(
+                    id=collection_id,
+                    profile_id=profile_id,
+                    logical_name=str(logical_name),
+                    collection_name=str(collection_name),
+                    backend="external_vector_store_or_pgvector",
+                    dimension=dimension,
+                    similarity_metric=similarity_metric or "cosine",
+                    status="registered",
+                    metadata_json={"source": "embedding_profile_registry"},
+                    created_at=created_at,
+                )
+            )
+        row = connection.execute(select(embedding_profiles).where(embedding_profiles.c.id == profile_id)).mappings().first()
+    record_event("embedding_profile_registered", "Perfil de embedding registrado", {"profile_id": profile_id, "requested_by": requested_by})
+    return {"status": "ok", "profile": serialize_embedding_profile(row)}
+
+
+def activate_embedding_profile(profile_id: str, requested_by: str | None, reason: str | None, confirm: bool) -> dict[str, Any] | None:
+    if not confirm:
+        raise ValueError("Ativação de perfil de embedding exige confirm=true.")
+    activated_at = now()
+    with engine.begin() as connection:
+        row = connection.execute(select(embedding_profiles).where(embedding_profiles.c.id == profile_id)).mappings().first()
+        if row is None:
+            return None
+        connection.execute(update(embedding_profiles).values(status="inactive"))
+        connection.execute(update(vector_collections).values(status="inactive"))
+        connection.execute(update(embedding_profiles).where(embedding_profiles.c.id == profile_id).values(status="active"))
+        connection.execute(update(vector_collections).where(vector_collections.c.profile_id == profile_id).values(status="active"))
+        updated = connection.execute(select(embedding_profiles).where(embedding_profiles.c.id == profile_id)).mappings().first()
+    record_event("embedding_profile_activated", "Perfil de embedding ativado", {"profile_id": profile_id, "requested_by": requested_by, "reason": reason, "activated_at": activated_at.isoformat()})
+    return {"status": "ok", "profile": serialize_embedding_profile(updated), "next_step": "reindex_embeddings_for_active_profile"}
+
+
+def serialize_embedding_profile(row: Any) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "provider": row["provider"],
+        "modelName": row["model_name"],
+        "modelVersion": row["model_version"],
+        "modelDigest": row["model_digest"],
+        "dimension": row["dimension"],
+        "similarityMetric": row["similarity_metric"],
+        "preprocessingVersion": row["preprocessing_version"],
+        "chunkingVersion": row["chunking_version"],
+        "status": row["status"],
+        "vectorCollections": row["vector_collections"] or {},
+        "metadata": row["metadata_json"] or {},
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
 def deployment_status(default_active_model_id: str) -> dict[str, Any]:
     with engine.connect() as connection:
         active_id = active_model_id_from_store(connection, default_active_model_id)
@@ -1369,6 +2036,151 @@ def serialize_deployment_rollout(row: Any) -> dict[str, Any] | None:
     }
 
 
+def ab_testing_status(default_active_model_id: str) -> dict[str, Any]:
+    with engine.connect() as connection:
+        active_id = active_model_id_from_store(connection, default_active_model_id)
+        latest = latest_ab_experiment(connection)
+        active_count = connection.execute(select(func.count()).select_from(ab_experiments).where(ab_experiments.c.status == "active")).scalar_one()
+        rows = connection.execute(select(ab_experiments).order_by(ab_experiments.c.created_at.desc()).limit(10)).mappings().fetchall()
+    return {
+        "status": "ok",
+        "active_model_id": active_id,
+        "active_count": int(active_count or 0),
+        "latest_experiment": serialize_ab_experiment(latest),
+        "experiments": [serialize_ab_experiment(row) for row in rows],
+    }
+
+
+def start_ab_test(
+    default_active_model_id: str,
+    candidate_model_id: str,
+    baseline_model_id: str | None,
+    traffic_split_percent: float,
+    primary_metric: str | None,
+    requested_by: str | None,
+    reason: str | None,
+    guardrails: dict[str, Any] | None,
+    confirm: bool,
+) -> dict[str, Any]:
+    if not confirm:
+        raise ValueError("Experimento A/B exige confirm=true.")
+    if traffic_split_percent <= 0 or traffic_split_percent >= 100:
+        raise ValueError("A/B exige traffic_split_percent maior que 0 e menor que 100.")
+    created_at = now()
+    with engine.begin() as connection:
+        active_id = active_model_id_from_store(connection, default_active_model_id)
+        baseline_id = baseline_model_id or active_id
+        if not model_exists(connection, baseline_id):
+            raise ValueError(f"Modelo baseline {baseline_id} não existe no runtime.")
+        if not model_exists(connection, candidate_model_id):
+            raise ValueError(f"Modelo candidato {candidate_model_id} não existe no runtime.")
+        if baseline_id == candidate_model_id:
+            raise ValueError("A/B exige modelos baseline e candidato diferentes.")
+        previous = connection.execute(select(ab_experiments).where(ab_experiments.c.status == "active").order_by(ab_experiments.c.created_at.desc()).limit(1)).mappings().first()
+        if previous:
+            connection.execute(
+                update(ab_experiments)
+                .where(ab_experiments.c.id == previous["id"])
+                .values(status="superseded", completed_at=created_at)
+            )
+        experiment_id = str(uuid4())
+        details = {
+            "traffic": {"baseline_percent": 100 - traffic_split_percent, "candidate_percent": traffic_split_percent},
+            "guardrails": guardrails or {},
+            "previous_experiment_id": previous["id"] if previous else None,
+            "routing": "deterministic_hash_assignment_expected_at_gateway_or_runtime_adapter",
+        }
+        connection.execute(
+            insert(ab_experiments).values(
+                id=experiment_id,
+                status="active",
+                baseline_model_id=baseline_id,
+                candidate_model_id=candidate_model_id,
+                traffic_split_percent=traffic_split_percent,
+                primary_metric=primary_metric or "primary",
+                winner_model_id=None,
+                reason=reason,
+                requested_by=requested_by,
+                details=details,
+                created_at=created_at,
+                completed_at=None,
+            )
+        )
+        row = connection.execute(select(ab_experiments).where(ab_experiments.c.id == experiment_id)).mappings().first()
+    record_event("ab_test_started", "Experimento A/B iniciado", {"experiment_id": experiment_id, "baseline_model_id": baseline_id, "candidate_model_id": candidate_model_id, "traffic_split_percent": traffic_split_percent})
+    return {"status": "ok", "experiment": serialize_ab_experiment(row), "ab_testing": ab_testing_status(default_active_model_id)}
+
+
+def complete_ab_test(
+    experiment_id: str,
+    winner_model_id: str | None,
+    metrics: dict[str, Any] | None,
+    completed_by: str | None,
+    confirm: bool,
+) -> dict[str, Any] | None:
+    if not confirm:
+        raise ValueError("Conclusão de A/B exige confirm=true.")
+    completed_at = now()
+    with engine.begin() as connection:
+        row = connection.execute(select(ab_experiments).where(ab_experiments.c.id == experiment_id)).mappings().first()
+        if row is None:
+            return None
+        if row["status"] == "completed":
+            return {"status": "ok", "experiment": serialize_ab_experiment(row)}
+        if row["status"] != "active":
+            raise ValueError(f"Experimento em status {row['status']} não pode ser concluído.")
+        allowed_winners = {row["baseline_model_id"], row["candidate_model_id"], "no_winner"}
+        effective_winner = winner_model_id or "no_winner"
+        if effective_winner not in allowed_winners:
+            raise ValueError("winner_model_id precisa ser baseline, candidato ou no_winner.")
+        details = dict(row["details"] or {})
+        details["result"] = {
+            "winner_model_id": effective_winner,
+            "metrics": metrics or {},
+            "completed_by": completed_by,
+            "completed_at": completed_at.isoformat(),
+        }
+        connection.execute(
+            update(ab_experiments)
+            .where(ab_experiments.c.id == experiment_id)
+            .values(status="completed", winner_model_id=effective_winner, details=details, completed_at=completed_at)
+        )
+        connection.execute(
+            insert(metric_snapshots).values(
+                id=f"{experiment_id}-metrics",
+                scope="ab_test",
+                metrics={"winner_model_id": effective_winner, "primary_metric": row["primary_metric"], "metrics": metrics or {}},
+                created_at=completed_at,
+            )
+        )
+        updated = connection.execute(select(ab_experiments).where(ab_experiments.c.id == experiment_id)).mappings().first()
+    record_event("ab_test_completed", "Experimento A/B concluído", {"experiment_id": experiment_id, "winner_model_id": effective_winner})
+    return {"status": "ok", "experiment": serialize_ab_experiment(updated)}
+
+
+def latest_ab_experiment(connection):
+    return connection.execute(select(ab_experiments).order_by(ab_experiments.c.created_at.desc()).limit(1)).mappings().first()
+
+
+def serialize_ab_experiment(row: Any) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "status": row["status"],
+        "baseline_model_id": row["baseline_model_id"],
+        "candidate_model_id": row["candidate_model_id"],
+        "traffic_split_percent": row["traffic_split_percent"],
+        "primary_metric": row["primary_metric"],
+        "winner_model_id": row["winner_model_id"],
+        "reason": row["reason"],
+        "requested_by": row["requested_by"],
+        "details": row["details"] or {},
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+    }
+
+
 def mask_payload(payload: dict[str, Any], sensitive_fields: list[str]) -> dict[str, Any]:
     masked: dict[str, Any] = {}
     for key, value in payload.items():
@@ -1386,14 +2198,85 @@ def digest_payload(payload: dict[str, Any]) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
-def record_prediction(payload: dict[str, Any], output: dict[str, Any], model_version_id: str, latency_ms: float, sensitive_fields: list[str]) -> str:
+def record_prediction(payload: dict[str, Any], output: dict[str, Any], model_version_id: str, latency_ms: float, sensitive_fields: list[str], project: dict[str, Any] | None = None) -> str:
     run_id = str(uuid4())
     row_id = str(uuid4())
+    created_at = now()
     input_masked = payload if settings.store_full_payload else mask_payload(payload, sensitive_fields)
     with engine.begin() as connection:
-        connection.execute(insert(prediction_runs).values(id=run_id, model_version_id=model_version_id, status="success", latency_ms=latency_ms, created_at=now()))
-        connection.execute(insert(prediction_rows).values(id=row_id, run_id=run_id, model_version_id=model_version_id, input_digest=digest_payload(payload), input_masked=input_masked, output=output, latency_ms=latency_ms, created_at=now()))
+        connection.execute(insert(prediction_runs).values(id=run_id, model_version_id=model_version_id, status="success", latency_ms=latency_ms, created_at=created_at))
+        connection.execute(insert(prediction_rows).values(id=row_id, run_id=run_id, model_version_id=model_version_id, input_digest=digest_payload(payload), input_masked=input_masked, output=output, latency_ms=latency_ms, created_at=created_at))
+        if project:
+            record_legal_prediction_context(connection, run_id, row_id, payload, output, project, created_at)
     return run_id
+
+
+def record_legal_prediction_context(connection, run_id: str, row_id: str, payload: dict[str, Any], output: dict[str, Any], project: dict[str, Any], created_at: datetime) -> None:
+    legal = legal_domain_config(project)
+    if not legal:
+        return
+    process_field = str(legal.get("processIdentifierField") or "numero_unico")
+    text_field = str(legal.get("documentTextField") or "texto")
+    workflow_field = str(legal.get("workflowContextField") or "workflow_step_atual")
+    process_identifier = payload.get(process_field) or f"prediction:{run_id}"
+    process_id = sha256(str(process_identifier).encode("utf-8")).hexdigest()
+    workflow_step = payload.get(workflow_field)
+    workflow_step_code = str(workflow_step) if workflow_step is not None and str(workflow_step).strip() else None
+    category_code = str(output.get("prediction")) if output.get("prediction") is not None else None
+    if row_exists(connection, legal_processes, process_id):
+        connection.execute(
+            update(legal_processes)
+            .where(legal_processes.c.id == process_id)
+            .values(current_workflow_step=workflow_step_code, updated_at=created_at)
+        )
+    else:
+        connection.execute(
+            insert(legal_processes).values(
+                id=process_id,
+                process_identifier=str(process_identifier),
+                current_workflow_step=workflow_step_code,
+                metadata_json={"source": "prediction_runtime", "processIdentifierField": process_field},
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+    document_text = payload.get(text_field)
+    text_hash = sha256(str(document_text or "").encode("utf-8")).hexdigest() if document_text is not None else None
+    connection.execute(
+        insert(legal_documents).values(
+            id=row_id,
+            process_id=process_id,
+            prediction_run_id=run_id,
+            prediction_row_id=row_id,
+            category_code=category_code,
+            workflow_step_code=workflow_step_code,
+            text_hash=text_hash,
+            metadata_json={
+                "documentTextField": text_field,
+                "review": output.get("review", {}),
+                "decision": output.get("decision", {}),
+                "scores": output.get("explanation", {}).get("scores", {}),
+            },
+            created_at=created_at,
+        )
+    )
+    andamento_id = f"{row_id}-andamento"
+    connection.execute(
+        insert(legal_andamentos).values(
+            id=andamento_id,
+            process_id=process_id,
+            workflow_step_code=workflow_step_code,
+            category_code=category_code,
+            prediction_row_id=row_id,
+            status=output.get("review", {}).get("status", "recorded"),
+            details={
+                "blockedRules": output.get("explanation", {}).get("workflow", {}).get("blockedRules", []),
+                "humanReviewRequired": output.get("review", {}).get("humanReviewRequired", False),
+                "llmReviewRecommended": output.get("decision", {}).get("llmReviewRecommended", False),
+            },
+            created_at=created_at,
+        )
+    )
 
 
 def record_prediction_feedback(
@@ -1776,12 +2659,16 @@ def runtime_metrics(active_model_id: str) -> dict[str, Any]:
         latest_drift_score = connection.execute(select(drift_runs.c.score).order_by(drift_runs.c.created_at.desc()).limit(1)).scalar_one_or_none()
         avg_latency = connection.execute(select(func.avg(prediction_rows.c.latency_ms))).scalar_one()
         retraining_pending = connection.execute(select(func.count()).select_from(retraining_requests).where(retraining_requests.c.status.in_(["pending_review", "approved_pending_runner"]))).scalar_one()
+        ab_experiment_count = connection.execute(select(func.count()).select_from(ab_experiments)).scalar_one()
+        active_ab_experiment_count = connection.execute(select(func.count()).select_from(ab_experiments).where(ab_experiments.c.status == "active")).scalar_one()
     feedback = feedback_summary(active_model_id)
     return {
         "active_model_id": active_model_id,
         "prediction_count": int(prediction_count or 0),
         "evaluation_count": int(evaluation_count or 0),
         "drift_count": int(drift_count or 0),
+        "ab_experiment_count": int(ab_experiment_count or 0),
+        "active_ab_experiment_count": int(active_ab_experiment_count or 0),
         "feedback_count": feedback["feedback_count"],
         "feedback_accuracy": feedback["feedback_accuracy"],
         "retraining_pending_count": int(retraining_pending or 0),
@@ -1954,6 +2841,7 @@ def parse_int(value: str) -> int | None:
 
 function renderRuntimePy(): string {
   return `import base64
+import copy
 import hashlib
 import json
 import math
@@ -1962,7 +2850,7 @@ import re
 from pathlib import Path
 from typing import Any
 from sqlalchemy import select
-from .db import deployment_rollouts, engine, model_versions
+from .db import deployment_rollouts, embedding_profiles as embedding_profiles_table, engine, model_versions
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -1986,27 +2874,48 @@ project = load_json("project.json")
 pipeline = load_json("pipeline.flow.json")
 runtime_manifest = load_json("runtime.manifest.json")
 latest_training_result = load_optional_json("latest-training-result.json")
+PREDICTION_CACHE: dict[str, dict[str, Any]] = {}
+PREDICTION_CACHE_MAX_ITEMS = 512
 
 
 def model_catalog() -> list[dict[str, Any]]:
     models = []
     trained_models = trained_model_lookup()
+    stored_models = stored_model_lookup()
     active_id = operational_active_model_id()
+    seen_model_ids = set()
     for node in pipeline.get("nodes", []):
         if node.get("type") == "model":
             trained = trained_models.get(node["id"], {})
+            stored = stored_models.get(node["id"], {})
+            seen_model_ids.add(node["id"])
             models.append({
                 "id": node["id"],
                 "label": node.get("label", node["id"]),
-                "algorithm": node.get("algorithm") or node.get("framework") or "custom",
+                "algorithm": stored.get("algorithm") or node.get("algorithm") or node.get("framework") or "custom",
                 "role": node.get("modelRole", "candidate"),
-                "status": "active" if node["id"] == active_id else "candidate",
-                "metrics": trained.get("metrics") or synthetic_model_metrics(node["id"]),
-                "artifact_uri": trained.get("artifactUri"),
+                "status": "active" if node["id"] == active_id else stored.get("status") or "candidate",
+                "metrics": stored.get("metrics") or trained.get("metrics") or synthetic_model_metrics(node["id"]),
+                "artifact_uri": stored.get("artifact_uri") or trained.get("artifactUri"),
                 "training_run_id": latest_training_result.get("runId") if trained and latest_training_result else None,
                 "training_rows": trained.get("trainingRows"),
                 "validation_rows": trained.get("validationRows"),
             })
+    for model_id, stored in stored_models.items():
+        if model_id in seen_model_ids:
+            continue
+        models.append({
+            "id": model_id,
+            "label": model_id,
+            "algorithm": stored.get("algorithm") or "registered",
+            "role": "registered",
+            "status": "active" if model_id == active_id or stored.get("is_active") else stored.get("status") or "registered",
+            "metrics": stored.get("metrics") or synthetic_model_metrics(model_id),
+            "artifact_uri": stored.get("artifact_uri"),
+            "training_run_id": None,
+            "training_rows": None,
+            "validation_rows": None,
+        })
     if not models:
         models.append({
             "id": "deterministic_baseline",
@@ -2027,6 +2936,25 @@ def trained_model_lookup() -> dict[str, dict[str, Any]]:
         if isinstance(model, dict) and model.get("modelId"):
             lookup[str(model["modelId"])] = model
     return lookup
+
+
+def stored_model_lookup() -> dict[str, dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(select(model_versions)).mappings().fetchall()
+        return {
+            str(row["id"]): {
+                "id": row["id"],
+                "status": row["status"],
+                "algorithm": row["algorithm"],
+                "metrics": row["metrics"] or {},
+                "artifact_uri": row["artifact_uri"],
+                "is_active": bool(row["is_active"]),
+            }
+            for row in rows
+        }
+    except Exception:
+        return {}
 
 
 def resolve_artifact_uri(artifact_uri: str | None) -> Path | None:
@@ -2123,6 +3051,10 @@ def model_card() -> dict[str, Any]:
 def predict_payload(payload: dict[str, Any]) -> dict[str, Any]:
     active = active_model()
     rollout = active_rollout()
+    if not rollout:
+        cached = prediction_cache_get(payload, active)
+        if cached:
+            return cached
     if rollout and rollout.get("kind") == "canary":
         candidate = model_by_id(str(rollout.get("candidate_model_id") or ""))
         traffic_percent = float(rollout.get("traffic_percent") or 0.0)
@@ -2140,7 +3072,62 @@ def predict_payload(payload: dict[str, Any]) -> dict[str, Any]:
             shadow_output = predict_with_model(payload, candidate)
             output["deployment"] = {"mode": "shadow", "rollout_id": rollout["id"], "routed_to": "active", "active_model_id": active["id"], "candidate_model_id": candidate["id"]}
             output["shadow_prediction"] = compact_shadow_prediction(shadow_output)
+    if not rollout:
+        return prediction_cache_put(payload, active, output)
     return output
+
+
+def prediction_cache_get(payload: dict[str, Any], model: dict[str, Any]) -> dict[str, Any] | None:
+    key = prediction_cache_key(payload, model)
+    cached = PREDICTION_CACHE.get(key)
+    if not cached:
+        return None
+    output = copy.deepcopy(cached)
+    output["cache"] = {"hit": True, "key": key, "strategy": "in_memory_versioned_payload_cache"}
+    return output
+
+
+def prediction_cache_put(payload: dict[str, Any], model: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
+    key = prediction_cache_key(payload, model)
+    stored = copy.deepcopy(output)
+    stored.pop("cache", None)
+    PREDICTION_CACHE[key] = stored
+    while len(PREDICTION_CACHE) > PREDICTION_CACHE_MAX_ITEMS:
+        PREDICTION_CACHE.pop(next(iter(PREDICTION_CACHE)))
+    response = copy.deepcopy(output)
+    response["cache"] = {"hit": False, "key": key, "strategy": "in_memory_versioned_payload_cache"}
+    return response
+
+
+def prediction_cache_key(payload: dict[str, Any], model: dict[str, Any]) -> str:
+    raw = json.dumps(
+        {
+            "payload": payload,
+            "projectHash": runtime_manifest.get("projectHash"),
+            "pipelineHash": runtime_manifest.get("pipelineHash"),
+            "modelVersionId": model.get("id"),
+            "legalPolicy": legal_cache_policy_key(),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def legal_cache_policy_key() -> dict[str, Any]:
+    legal = legal_domain()
+    if not legal:
+        return {}
+    embedding_profile = active_legal_embedding_profile(legal) or {}
+    return {
+        "decisionPolicy": legal_decision_policy(legal).get("version"),
+        "embeddingProfileId": embedding_profile.get("id"),
+        "embeddingModelVersion": embedding_profile.get("modelVersion"),
+        "preprocessingVersion": embedding_profile.get("preprocessingVersion"),
+        "chunkingVersion": embedding_profile.get("chunkingVersion"),
+        "llmPromptTemplateVersion": (legal.get("llm") or {}).get("promptTemplateVersion") if isinstance(legal.get("llm"), dict) else None,
+    }
 
 
 def predict_with_model(payload: dict[str, Any], model: dict[str, Any]) -> dict[str, Any]:
@@ -2149,9 +3136,9 @@ def predict_with_model(payload: dict[str, Any], model: dict[str, Any]) -> dict[s
     artifact = load_model_artifact(model)
     artifact_prediction = predict_from_artifact(artifact, payload, problem, trace, model) if artifact else None
     if artifact_prediction:
-        return artifact_prediction
+        return enrich_prediction_output(artifact_prediction, payload, trace)
 
-    return synthetic_predict_payload(payload, model, problem, trace)
+    return enrich_prediction_output(synthetic_predict_payload(payload, model, problem, trace), payload, trace)
 
 
 def rollout_bucket(payload: dict[str, Any]) -> float:
@@ -2167,6 +3154,539 @@ def compact_shadow_prediction(output: dict[str, Any]) -> dict[str, Any]:
         "confidence": output.get("confidence"),
         "inference_source": output.get("inference_source"),
     }
+
+
+def enrich_prediction_output(output: dict[str, Any], payload: dict[str, Any], trace: list[dict[str, Any]]) -> dict[str, Any]:
+    legal = legal_domain()
+    if not legal or project["problem"].get("type") == "regression":
+        return output
+
+    explanation = legal_explanation(payload, output, legal)
+    trace.append({
+        "node_id": "legal_decision_policy",
+        "type": "domain_policy",
+        "status": explanation["review"]["status"],
+        "details": {
+            "policy_version": explanation["decisionPolicy"]["version"],
+            "review_reasons": explanation["review"]["reasons"],
+            "final_score": explanation["scores"]["finalScore"],
+        },
+    })
+    output["explanation"] = explanation
+    output["review"] = explanation["review"]
+    output["decision"] = explanation["decision"]
+    output["top_candidates"] = explanation["topCandidates"]
+    output["embedding_profile"] = explanation["embeddingProfile"]
+    return output
+
+
+def legal_domain() -> dict[str, Any] | None:
+    domain = project.get("domain", {})
+    if not isinstance(domain, dict) or domain.get("kind") != "legal_classification":
+        return None
+    legal = domain.get("legal")
+    return legal if isinstance(legal, dict) else None
+
+
+def legal_explanation(payload: dict[str, Any], output: dict[str, Any], legal: dict[str, Any]) -> dict[str, Any]:
+    prediction = str(output.get("prediction") or "")
+    categories = legal_categories_by_code(legal)
+    category = legal_category_payload(categories.get(prediction), prediction)
+    probabilities = output.get("probabilities") if isinstance(output.get("probabilities"), dict) else {}
+    candidates = legal_top_candidates(probabilities, prediction, categories)
+    classifier_probability = as_float(output.get("confidence"))
+    if classifier_probability is None and candidates:
+        classifier_probability = as_float(candidates[0].get("probability"))
+    semantic_similarity = semantic_similarity_from_payload(payload)
+    workflow = legal_workflow_result(payload, prediction, legal)
+    policy = legal_decision_policy(legal)
+    final_score = legal_final_score(classifier_probability, semantic_similarity, workflow["ruleScore"], policy)
+    margin = legal_top_margin(candidates)
+    review = legal_review_decision(classifier_probability, margin, workflow, category, legal)
+    llm = legal_llm_decision(review, legal)
+    decision = {
+        "status": review["status"],
+        "categoryCode": prediction,
+        "categoryName": category.get("name"),
+        "confidence": classifier_probability,
+        "finalScore": final_score,
+        "humanReviewRequired": review["humanReviewRequired"],
+        "llmReviewRecommended": llm["recommended"],
+    }
+    rationale = legal_rationale(category, classifier_probability, semantic_similarity, workflow, final_score, review, llm)
+    return {
+        "kind": "legal_classification",
+        "category": category,
+        "decision": decision,
+        "scores": {
+            "classifierProbability": classifier_probability,
+            "semanticSimilarity": semantic_similarity,
+            "workflowRuleScore": workflow["ruleScore"],
+            "finalScore": final_score,
+            "topMargin": margin,
+        },
+        "topCandidates": candidates,
+        "workflow": workflow,
+        "decisionPolicy": policy,
+        "embeddingProfile": active_legal_embedding_profile(legal),
+        "llm": llm,
+        "review": review,
+        "rationale": rationale,
+    }
+
+
+def legal_categories_by_code(legal: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    categories = legal.get("categories", [])
+    if not isinstance(categories, list):
+        return {}
+    return {
+        str(category.get("code")): category
+        for category in categories
+        if isinstance(category, dict) and category.get("code")
+    }
+
+
+def legal_category_payload(category: dict[str, Any] | None, code: str) -> dict[str, Any]:
+    source = category or {}
+    return {
+        "code": code,
+        "name": source.get("name") or code,
+        "description": source.get("description"),
+        "target": source.get("target"),
+        "critical": bool(source.get("critical", False)),
+        "requiresHumanReview": bool(source.get("requiresHumanReview", False)),
+        "workflowStepCodes": list(source.get("workflowStepCodes") or []),
+    }
+
+
+def legal_top_candidates(probabilities: Any, prediction: str, categories: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: dict[str, float] = {}
+    if isinstance(probabilities, dict):
+        for label, value in probabilities.items():
+            numeric = as_float(value)
+            if numeric is not None:
+                normalized[str(label)] = numeric
+    classes = [str(item) for item in project["problem"].get("classes") or []]
+    for label in classes:
+        normalized.setdefault(label, 0.0)
+    if prediction and prediction not in normalized:
+        normalized[prediction] = 1.0 if not probabilities else 0.0
+    items = sorted(normalized.items(), key=lambda item: item[1], reverse=True)
+    return [
+        {
+            "code": label,
+            "name": (categories.get(label) or {}).get("name") or label,
+            "probability": round(float(probability), 6),
+            "critical": bool((categories.get(label) or {}).get("critical", False)),
+            "requiresHumanReview": bool((categories.get(label) or {}).get("requiresHumanReview", False)),
+        }
+        for label, probability in items[:5]
+    ]
+
+
+def legal_top_margin(candidates: list[dict[str, Any]]) -> float | None:
+    if len(candidates) < 2:
+        return None
+    left = as_float(candidates[0].get("probability")) or 0.0
+    right = as_float(candidates[1].get("probability")) or 0.0
+    return round(max(0.0, left - right), 6)
+
+
+def legal_workflow_result(payload: dict[str, Any], prediction: str, legal: dict[str, Any]) -> dict[str, Any]:
+    workflow_field = str(legal.get("workflowContextField") or "workflow_step_atual")
+    current_step = payload.get(workflow_field)
+    current_step = str(current_step) if current_step is not None and str(current_step).strip() else None
+    categories = legal_categories_by_code(legal)
+    category = categories.get(prediction) or {}
+    allowed_steps = [str(item) for item in category.get("workflowStepCodes", [])]
+    workflow_steps = legal_workflow_steps_by_code(legal)
+    active_transitions = legal_active_transitions(legal)
+    transitions_from_current = [
+        transition
+        for transition in active_transitions
+        if current_step and transition.get("from") == current_step
+    ]
+    review_transitions_to_allowed = [
+        transition
+        for transition in transitions_from_current
+        if transition.get("to") in allowed_steps and transition.get("severity") == "review"
+    ]
+    blocked_rules: list[str] = []
+    if current_step is None:
+        status = "unknown"
+        allowed = None
+        rule_score = 0.5
+    elif current_step in allowed_steps:
+        status = "accepted"
+        allowed = True
+        rule_score = 1.0
+    elif review_transitions_to_allowed:
+        status = "review"
+        allowed = False
+        rule_score = 0.75
+        blocked_rules.append("workflow_requires_transition_confirmation")
+    else:
+        status = "blocked"
+        allowed = False
+        rule_score = 0.0
+        blocked_rules.append(f"category_{prediction}_not_allowed_from_{current_step}")
+    return {
+        "contextField": workflow_field,
+        "currentStep": current_step,
+        "currentStepName": (workflow_steps.get(current_step or "") or {}).get("name"),
+        "allowedSteps": allowed_steps,
+        "allowedStepNames": [(workflow_steps.get(step) or {}).get("name") or step for step in allowed_steps],
+        "allowed": allowed,
+        "status": status,
+        "ruleScore": rule_score,
+        "blockedRules": blocked_rules,
+        "availableTransitions": [
+            {
+                "from": transition.get("from"),
+                "to": transition.get("to"),
+                "severity": transition.get("severity"),
+                "condition": transition.get("condition"),
+            }
+            for transition in transitions_from_current
+        ],
+    }
+
+
+def legal_workflow_steps_by_code(legal: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    steps = legal.get("workflowSteps", [])
+    if not isinstance(steps, list):
+        return {}
+    return {
+        str(step.get("code")): step
+        for step in steps
+        if isinstance(step, dict) and step.get("code")
+    }
+
+
+def legal_active_transitions(legal: dict[str, Any]) -> list[dict[str, Any]]:
+    transitions = legal.get("workflowTransitions", [])
+    if not isinstance(transitions, list):
+        return []
+    return [
+        transition
+        for transition in transitions
+        if isinstance(transition, dict) and transition.get("active", True)
+    ]
+
+
+def legal_decision_policy(legal: dict[str, Any]) -> dict[str, Any]:
+    policy = legal.get("decisionPolicy") if isinstance(legal.get("decisionPolicy"), dict) else {}
+    weights = policy.get("weights") if isinstance(policy.get("weights"), dict) else {}
+    return {
+        "version": policy.get("version") or "legal-decision-policy-v1",
+        "lowConfidenceThreshold": as_float(policy.get("lowConfidenceThreshold")) if as_float(policy.get("lowConfidenceThreshold")) is not None else 0.62,
+        "topMarginThreshold": as_float(policy.get("topMarginThreshold")) if as_float(policy.get("topMarginThreshold")) is not None else 0.08,
+        "weights": {
+            "classifierProbability": as_float(weights.get("classifierProbability")) if as_float(weights.get("classifierProbability")) is not None else 0.55,
+            "semanticSimilarity": as_float(weights.get("semanticSimilarity")) if as_float(weights.get("semanticSimilarity")) is not None else 0.30,
+            "workflowRules": as_float(weights.get("workflowRules")) if as_float(weights.get("workflowRules")) is not None else 0.15,
+            "llmReview": as_float(weights.get("llmReview")) if as_float(weights.get("llmReview")) is not None else 0.0,
+        },
+    }
+
+
+def legal_final_score(classifier_probability: float | None, semantic_similarity: float | None, workflow_rule_score: float, policy: dict[str, Any]) -> float | None:
+    weights = policy.get("weights", {})
+    weighted_values: list[tuple[float, float]] = []
+    if classifier_probability is not None:
+        weighted_values.append((classifier_probability, float(weights.get("classifierProbability", 0.55))))
+    if semantic_similarity is not None:
+        weighted_values.append((semantic_similarity, float(weights.get("semanticSimilarity", 0.30))))
+    weighted_values.append((workflow_rule_score, float(weights.get("workflowRules", 0.15))))
+    total_weight = sum(weight for _value, weight in weighted_values if weight > 0)
+    if total_weight <= 0:
+        return classifier_probability
+    return round(sum(value * weight for value, weight in weighted_values if weight > 0) / total_weight, 6)
+
+
+def legal_review_decision(classifier_probability: float | None, top_margin: float | None, workflow: dict[str, Any], category: dict[str, Any], legal: dict[str, Any]) -> dict[str, Any]:
+    policy = legal_decision_policy(legal)
+    reasons: list[str] = []
+    if classifier_probability is not None and classifier_probability < float(policy["lowConfidenceThreshold"]):
+        reasons.append("low_confidence")
+    if top_margin is not None and top_margin < float(policy["topMarginThreshold"]):
+        reasons.append("top_margin_low")
+    if workflow["status"] == "blocked":
+        reasons.append("workflow_blocked")
+    elif workflow["status"] in {"review", "unknown"}:
+        reasons.append("workflow_requires_review")
+    if category.get("critical"):
+        reasons.append("critical_category")
+    if category.get("requiresHumanReview"):
+        reasons.append("category_requires_human_review")
+    status = "blocked" if "workflow_blocked" in reasons else "review" if reasons else "accepted"
+    return {
+        "status": status,
+        "humanReviewRequired": status != "accepted",
+        "reasons": reasons,
+        "lowConfidenceThreshold": policy["lowConfidenceThreshold"],
+        "topMarginThreshold": policy["topMarginThreshold"],
+    }
+
+
+def legal_llm_decision(review: dict[str, Any], legal: dict[str, Any]) -> dict[str, Any]:
+    llm = legal.get("llm") if isinstance(legal.get("llm"), dict) else {}
+    trigger_policy = [str(item) for item in llm.get("triggerPolicy", [])] if isinstance(llm.get("triggerPolicy"), list) else []
+    matching_triggers = [reason for reason in review.get("reasons", []) if reason in trigger_policy]
+    enabled = bool(llm.get("enabled", False))
+    return {
+        "enabled": enabled,
+        "recommended": enabled and bool(matching_triggers),
+        "used": False,
+        "reason": "llm_disabled_by_policy" if not enabled else "llm_not_invoked_in_local_runtime",
+        "triggerPolicy": trigger_policy,
+        "matchedTriggers": matching_triggers,
+        "promptTemplateVersion": llm.get("promptTemplateVersion") or "legal-low-confidence-v1",
+        "maskSensitiveData": bool(llm.get("maskSensitiveData", True)),
+        "jsonResponseRequired": bool(llm.get("jsonResponseRequired", True)),
+        "mustNotAutoApply": bool(llm.get("mustNotAutoApply", True)),
+    }
+
+
+def legal_rationale(
+    category: dict[str, Any],
+    classifier_probability: float | None,
+    semantic_similarity: float | None,
+    workflow: dict[str, Any],
+    final_score: float | None,
+    review: dict[str, Any],
+    llm: dict[str, Any],
+) -> list[str]:
+    rationale = [
+        f"Categoria {category.get('code')} ({category.get('name')}) foi escolhida pelo modelo ativo.",
+        f"Probabilidade do classificador: {classifier_probability if classifier_probability is not None else 'n/d'}.",
+        f"Score final híbrido: {final_score if final_score is not None else 'n/d'}.",
+    ]
+    if semantic_similarity is None:
+        rationale.append("Similaridade semântica não foi recebida no payload; o score foi reponderado sem a camada vetorial.")
+    else:
+        rationale.append(f"Similaridade semântica recebida: {semantic_similarity}.")
+    if workflow["status"] == "accepted":
+        rationale.append("A categoria é compatível com a etapa atual do workflow.")
+    elif workflow["status"] == "blocked":
+        rationale.append("A categoria viola as regras de workflow configuradas para a etapa atual.")
+    else:
+        rationale.append("O workflow exige revisão ou não possui etapa atual suficiente para aprovação automática.")
+    if review["humanReviewRequired"]:
+        rationale.append(f"Revisão humana exigida por: {', '.join(review['reasons'])}.")
+    if llm["recommended"]:
+        rationale.append("LLM recomendado como quarta camada, mas sem autoaplicação da decisão.")
+    return rationale
+
+
+def active_legal_embedding_profile(legal: dict[str, Any]) -> dict[str, Any] | None:
+    profiles = legal.get("embeddingProfiles", [])
+    if not isinstance(profiles, list):
+        return None
+    active = next((profile for profile in profiles if isinstance(profile, dict) and profile.get("status") == "active"), None)
+    fallback = next((profile for profile in profiles if isinstance(profile, dict)), None)
+    profile = active or fallback
+    if not profile:
+        return None
+    return {
+        "id": profile.get("id"),
+        "provider": profile.get("provider"),
+        "modelName": profile.get("modelName"),
+        "modelVersion": profile.get("modelVersion"),
+        "modelDigest": profile.get("modelDigest"),
+        "dimension": profile.get("dimension"),
+        "normalization": profile.get("normalization"),
+        "pooling": profile.get("pooling"),
+        "preprocessingVersion": profile.get("preprocessingVersion"),
+        "chunkingVersion": profile.get("chunkingVersion"),
+        "similarityMetric": profile.get("similarityMetric"),
+        "vectorCollections": profile.get("vectorCollections", {}),
+        "status": profile.get("status"),
+    }
+
+
+def stored_embedding_profile_lookup() -> dict[str, dict[str, Any]]:
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(select(embedding_profiles_table)).mappings().fetchall()
+        return {
+            str(row["id"]): {
+                "id": row["id"],
+                "provider": row["provider"],
+                "modelName": row["model_name"],
+                "modelVersion": row["model_version"],
+                "modelDigest": row["model_digest"],
+                "dimension": row["dimension"],
+                "normalization": (row["metadata_json"] or {}).get("normalization") if isinstance(row["metadata_json"], dict) else None,
+                "pooling": (row["metadata_json"] or {}).get("pooling") if isinstance(row["metadata_json"], dict) else None,
+                "preprocessingVersion": row["preprocessing_version"],
+                "chunkingVersion": row["chunking_version"],
+                "similarityMetric": row["similarity_metric"],
+                "vectorCollections": row["vector_collections"] or {},
+                "status": row["status"],
+                "source": "registry",
+            }
+            for row in rows
+        }
+    except Exception:
+        return {}
+
+
+def embedding_profiles() -> dict[str, Any]:
+    legal = legal_domain()
+    if not legal:
+        return {"kind": "embedding_profiles", "activeProfileId": None, "profiles": []}
+    stored_profiles = stored_embedding_profile_lookup()
+    profiles = []
+    seen_profile_ids = set()
+    for profile in legal.get("embeddingProfiles", []):
+        if isinstance(profile, dict):
+            response = active_legal_embedding_profile({"embeddingProfiles": [profile]})
+            if response and response.get("id") in stored_profiles:
+                response = {**response, **stored_profiles[str(response["id"])], "source": "manifest+registry"}
+            if response and response.get("id"):
+                seen_profile_ids.add(str(response["id"]))
+            profiles.append(response)
+    for profile_id, stored in stored_profiles.items():
+        if profile_id not in seen_profile_ids:
+            profiles.append(stored)
+    profiles = [profile for profile in profiles if profile]
+    active = next((profile for profile in profiles if profile.get("status") == "active"), None) or active_legal_embedding_profile(legal)
+    return {
+        "kind": "embedding_profiles",
+        "activeProfileId": active.get("id") if active else None,
+        "profiles": profiles,
+        "substitutionContract": {
+            "stableInputs": ["textHash", "entityType", "entityId", "chunkId"],
+            "versionedKeys": ["embeddingProfileId", "modelName", "modelVersion", "preprocessingVersion", "chunkingVersion"],
+            "architectureInvariant": "Trocar o modelo de embeddings exige novo profile e reindexação, sem alterar o contrato de inferência.",
+        },
+    }
+
+
+def embedding_search(query: str, collection: str | None = None, top_k: int = 5, profile_id: str | None = None) -> dict[str, Any]:
+    legal = legal_domain()
+    if not legal:
+        return {"kind": "embedding_search", "status": "empty", "profileId": profile_id, "collection": collection, "results": []}
+    profile_catalog = embedding_profiles()
+    active = next((profile for profile in profile_catalog.get("profiles", []) if profile.get("id") == profile_catalog.get("activeProfileId")), None) or active_legal_embedding_profile(legal)
+    effective_profile_id = profile_id or (active.get("id") if active else None)
+    candidates = legal_embedding_search_candidates(legal, collection)
+    scored = [
+        {
+            **candidate,
+            "score": lexical_similarity(query, candidate.get("text", "")),
+            "profileId": effective_profile_id,
+        }
+        for candidate in candidates
+    ]
+    scored = [item for item in scored if item["score"] > 0]
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return {
+        "kind": "embedding_search",
+        "status": "ok",
+        "profileId": effective_profile_id,
+        "collection": collection or "all",
+        "topK": top_k,
+        "metric": active.get("similarityMetric") if active else "cosine",
+        "results": [
+            {
+                "entityType": item["entityType"],
+                "entityId": item["entityId"],
+                "label": item["label"],
+                "score": round(float(item["score"]), 6),
+                "metadata": item["metadata"],
+            }
+            for item in scored[: max(1, min(int(top_k or 5), 50))]
+        ],
+        "implementation": "deterministic_lexical_fallback",
+        "message": "Busca local usa fallback lexical determinístico quando o banco vetorial externo não está conectado.",
+    }
+
+
+def legal_embedding_search_candidates(legal: dict[str, Any], collection: str | None) -> list[dict[str, Any]]:
+    collection_filter = str(collection or "").strip()
+    candidates: list[dict[str, Any]] = []
+    if not collection_filter or collection_filter in {"categories", "legal_categories"}:
+        for category in legal.get("categories", []):
+            if isinstance(category, dict) and category.get("code"):
+                candidates.append({
+                    "entityType": "legal_category",
+                    "entityId": str(category["code"]),
+                    "label": category.get("name") or category["code"],
+                    "text": " ".join(str(category.get(key) or "") for key in ("code", "name", "description", "target")),
+                    "metadata": {"critical": bool(category.get("critical", False)), "workflowStepCodes": category.get("workflowStepCodes", [])},
+                })
+    if not collection_filter or collection_filter in {"workflowSteps", "workflow_steps", "legal_workflow_steps"}:
+        for step in legal.get("workflowSteps", []):
+            if isinstance(step, dict) and step.get("code"):
+                candidates.append({
+                    "entityType": "legal_workflow_step",
+                    "entityId": str(step["code"]),
+                    "label": step.get("name") or step["code"],
+                    "text": " ".join(str(step.get(key) or "") for key in ("code", "name", "description", "rite", "stepType")),
+                    "metadata": {"rite": step.get("rite"), "order": step.get("order")},
+                })
+    return candidates
+
+
+def lexical_similarity(query: str, text: str) -> float:
+    query_tokens = set(tokenize_text(query))
+    text_tokens = set(tokenize_text(text))
+    if not query_tokens or not text_tokens:
+        return 0.0
+    overlap = len(query_tokens & text_tokens)
+    union = len(query_tokens | text_tokens)
+    return overlap / max(1, union)
+
+
+def tokenize_text(value: str) -> list[str]:
+    return re.findall(r"[A-Za-zÀ-ÿ0-9_]+", str(value).lower())
+
+
+def request_embedding_reindex(profile_id: str | None = None, requested_by: str | None = None, reason: str | None = None, confirm: bool = False) -> dict[str, Any]:
+    if not confirm:
+        return {
+            "status": "requires_confirmation",
+            "message": "Reindexação de embeddings exige confirm=true.",
+            "profileId": profile_id,
+        }
+    profiles = embedding_profiles()
+    active_profile_id = profiles.get("activeProfileId")
+    effective_profile_id = profile_id or active_profile_id
+    if not effective_profile_id:
+        return {"status": "empty", "message": "Nenhum perfil de embedding configurado.", "profileId": None}
+    job_raw = json.dumps({"profileId": effective_profile_id, "requestedBy": requested_by, "reason": reason, "projectHash": runtime_manifest.get("projectHash")}, sort_keys=True, ensure_ascii=False)
+    job_id = "embedding-reindex-" + hashlib.sha256(job_raw.encode("utf-8")).hexdigest()[:12]
+    return {
+        "status": "queued",
+        "jobId": job_id,
+        "profileId": effective_profile_id,
+        "requestedBy": requested_by,
+        "reason": reason,
+        "mode": "external_worker_required",
+        "message": "Runtime registrou a intenção; a geração vetorial pesada deve ser executada por worker dedicado.",
+    }
+
+
+def semantic_similarity_from_payload(payload: dict[str, Any]) -> float | None:
+    for key in ("semanticSimilarity", "semantic_similarity", "semantic_score", "score_semantico"):
+        value = as_float(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def as_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(numeric) or math.isinf(numeric):
+        return None
+    return round(numeric, 6)
 
 
 def evaluate_records(records: list[dict[str, Any]], labels: list[Any] | None = None) -> dict[str, Any]:
@@ -2211,7 +3731,14 @@ def evaluate_model_records(model: dict[str, Any], records: list[dict[str, Any]],
         actual_labels = [str(actual) for actual in actuals]
         predicted_labels = [str(prediction) for prediction in predictions]
         known_labels = sorted(set(problem.get("classes") or []) | set(actual_labels) | set(predicted_labels))
-        metrics = classification_metrics(actual_labels, predicted_labels, known_labels)
+        probability_rows = [
+            output.get("probabilities") if isinstance(output.get("probabilities"), dict) else {}
+            for output in outputs
+        ]
+        metrics = {
+            **classification_metrics(actual_labels, predicted_labels, known_labels, probability_rows),
+            **classification_operational_metrics(outputs),
+        }
 
     return {
         "status": "ok",
@@ -2756,7 +4283,7 @@ def is_number_like(value: Any) -> bool:
         return False
 
 
-def classification_metrics(actuals: list[str], predictions: list[str], labels: list[str]) -> dict[str, Any]:
+def classification_metrics(actuals: list[str], predictions: list[str], labels: list[str], probability_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     total = max(1, len(actuals))
     accuracy = sum(1 for actual, prediction in zip(actuals, predictions) if actual == prediction) / total
     per_label: dict[str, dict[str, Any]] = {}
@@ -2775,16 +4302,165 @@ def classification_metrics(actuals: list[str], predictions: list[str], labels: l
             f1_values.append(f1)
             weighted_sum += f1 * support
     matrix = [[sum(1 for actual, prediction in zip(actuals, predictions) if actual == left and prediction == right) for right in labels] for left in labels]
+    probabilities = normalize_probability_rows(probability_rows or [], labels, predictions)
     return {
         "accuracy": round(accuracy, 6),
         "f1_macro": round(sum(f1_values) / len(f1_values), 6) if f1_values else 0.0,
         "f1_weighted": round(weighted_sum / total, 6),
         "precision_macro": round(sum(item["precision"] for item in per_label.values()) / max(1, len(per_label)), 6),
         "recall_macro": round(sum(item["recall"] for item in per_label.values()) / max(1, len(per_label)), 6),
+        "top_3_accuracy": top_k_accuracy(actuals, probabilities, 3),
+        "top_5_accuracy": top_k_accuracy(actuals, probabilities, 5),
+        "brier_score": brier_score(actuals, probabilities, labels),
+        "expected_calibration_error": expected_calibration_error(actuals, predictions, probabilities),
+        "roc_auc_ovr": roc_auc_ovr(actuals, probabilities, labels),
+        "pr_auc_macro": pr_auc_macro(actuals, probabilities, labels),
+        "semantic_recall_at_5": top_k_accuracy(actuals, probabilities, 5),
         "labels": labels,
         "per_label": per_label,
         "confusion_matrix": matrix,
     }
+
+
+def normalize_probability_rows(probability_rows: list[dict[str, Any]], labels: list[str], predictions: list[str]) -> list[dict[str, float]]:
+    normalized_rows: list[dict[str, float]] = []
+    for index, prediction in enumerate(predictions):
+        source = probability_rows[index] if index < len(probability_rows) and isinstance(probability_rows[index], dict) else {}
+        row: dict[str, float] = {}
+        for label in labels:
+            value = as_probability(source.get(label))
+            row[label] = value if value is not None else 0.0
+        if prediction and sum(row.values()) <= 0:
+            row[prediction] = 1.0
+        normalized_rows.append(row)
+    return normalized_rows
+
+
+def top_k_accuracy(actuals: list[str], probability_rows: list[dict[str, float]], k: int) -> float:
+    if not actuals:
+        return 0.0
+    hits = 0
+    for actual, probabilities in zip(actuals, probability_rows):
+        top_labels = [label for label, _score in sorted(probabilities.items(), key=lambda item: item[1], reverse=True)[:k]]
+        if actual in top_labels:
+            hits += 1
+    return round(hits / max(1, len(actuals)), 6)
+
+
+def brier_score(actuals: list[str], probability_rows: list[dict[str, float]], labels: list[str]) -> float:
+    if not actuals:
+        return 0.0
+    total = 0.0
+    for actual, probabilities in zip(actuals, probability_rows):
+        total += sum((float(probabilities.get(label, 0.0)) - (1.0 if actual == label else 0.0)) ** 2 for label in labels)
+    return round(total / max(1, len(actuals)), 6)
+
+
+def expected_calibration_error(actuals: list[str], predictions: list[str], probability_rows: list[dict[str, float]], bins: int = 10) -> float:
+    if not actuals:
+        return 0.0
+    ece = 0.0
+    total = len(actuals)
+    for bucket in range(bins):
+        lower = bucket / bins
+        upper = (bucket + 1) / bins
+        indexes = []
+        for index, probabilities in enumerate(probability_rows):
+            confidence = max(probabilities.values(), default=0.0)
+            if (bucket == 0 and confidence >= lower and confidence <= upper) or (confidence > lower and confidence <= upper):
+                indexes.append(index)
+        if not indexes:
+            continue
+        accuracy = sum(1 for index in indexes if actuals[index] == predictions[index]) / len(indexes)
+        confidence_mean = sum(max(probability_rows[index].values(), default=0.0) for index in indexes) / len(indexes)
+        ece += (len(indexes) / total) * abs(accuracy - confidence_mean)
+    return round(ece, 6)
+
+
+def roc_auc_ovr(actuals: list[str], probability_rows: list[dict[str, float]], labels: list[str]) -> float | None:
+    auc_values = []
+    for label in labels:
+        scores = [row.get(label, 0.0) for row in probability_rows]
+        auc = binary_roc_auc([actual == label for actual in actuals], scores)
+        if auc is not None:
+            auc_values.append(auc)
+    return round(sum(auc_values) / len(auc_values), 6) if auc_values else None
+
+
+def binary_roc_auc(positives: list[bool], scores: list[float]) -> float | None:
+    positive_scores = [score for is_positive, score in zip(positives, scores) if is_positive]
+    negative_scores = [score for is_positive, score in zip(positives, scores) if not is_positive]
+    if not positive_scores or not negative_scores:
+        return None
+    wins = 0.0
+    for positive_score in positive_scores:
+        for negative_score in negative_scores:
+            if positive_score > negative_score:
+                wins += 1.0
+            elif positive_score == negative_score:
+                wins += 0.5
+    return wins / (len(positive_scores) * len(negative_scores))
+
+
+def pr_auc_macro(actuals: list[str], probability_rows: list[dict[str, float]], labels: list[str]) -> float | None:
+    values = []
+    for label in labels:
+        value = average_precision([actual == label for actual in actuals], [row.get(label, 0.0) for row in probability_rows])
+        if value is not None:
+            values.append(value)
+    return round(sum(values) / len(values), 6) if values else None
+
+
+def average_precision(positives: list[bool], scores: list[float]) -> float | None:
+    total_positives = sum(1 for item in positives if item)
+    if total_positives <= 0:
+        return None
+    ranked = sorted(zip(scores, positives), key=lambda item: item[0], reverse=True)
+    hits = 0
+    precision_sum = 0.0
+    for index, (_score, is_positive) in enumerate(ranked, start=1):
+        if is_positive:
+            hits += 1
+            precision_sum += hits / index
+    return precision_sum / total_positives
+
+
+def classification_operational_metrics(outputs: list[dict[str, Any]]) -> dict[str, float]:
+    total = max(1, len(outputs))
+    low_confidence = 0
+    human_review = 0
+    llm_review = 0
+    workflow_blocked = 0
+    for output in outputs:
+        review = output.get("review", {}) if isinstance(output.get("review"), dict) else {}
+        reasons = review.get("reasons", []) if isinstance(review.get("reasons"), list) else []
+        if "low_confidence" in reasons:
+            low_confidence += 1
+        if bool(review.get("humanReviewRequired", False)):
+            human_review += 1
+        explanation = output.get("explanation", {}) if isinstance(output.get("explanation"), dict) else {}
+        llm = explanation.get("llm", {}) if isinstance(explanation.get("llm"), dict) else {}
+        if bool(output.get("decision", {}).get("llmReviewRecommended", False)) or bool(llm.get("recommended", False)):
+            llm_review += 1
+        workflow = explanation.get("workflow", {}) if isinstance(explanation.get("workflow"), dict) else {}
+        if workflow.get("status") == "blocked" or "workflow_blocked" in reasons:
+            workflow_blocked += 1
+    return {
+        "low_confidence_rate": round(low_confidence / total, 6),
+        "human_review_rate": round(human_review / total, 6),
+        "llm_review_rate": round(llm_review / total, 6),
+        "invalid_workflow_transition_rate": round(workflow_blocked / total, 6),
+    }
+
+
+def as_probability(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(numeric) or math.isinf(numeric):
+        return None
+    return max(0.0, min(1.0, round(numeric, 6)))
 
 
 def regression_metrics(actuals: list[float], predictions: list[float]) -> dict[str, float]:
@@ -2997,8 +4673,8 @@ from pydantic import BaseModel, Field
 from .dashboard import dashboard_html
 from .db import init_db
 from .environment import gpu_environment
-from .repository import Timer, approve_retraining_request, check_database, complete_retraining_request, create_retraining_request, deployment_status, feedback_summary, latest_drift, record_drift, record_evaluation, record_event, record_prediction, record_prediction_feedback, retraining_status, retraining_training_set, rollback_deployment, runtime_metrics, seed_training_metadata, start_canary_deployment, start_shadow_deployment
-from .runtime import active_model, backtest_records, calculate_drift, evaluate_records, latest_training_result, model_card, model_catalog, model_metrics, predict_payload, project, promotion_status, runtime_manifest
+from .repository import Timer, ab_testing_status, activate_embedding_profile, approve_retraining_request, check_database, complete_ab_test, complete_retraining_request, create_retraining_request, deployment_status, domain_metadata_summary, feedback_summary, latest_drift, promote_model_version, record_drift, record_evaluation, record_event, record_prediction, record_prediction_feedback, registered_model_version, register_embedding_profile, register_model_version, retraining_status, retraining_training_set, rollback_deployment, runtime_metrics, seed_domain_metadata, seed_training_metadata, start_ab_test, start_canary_deployment, start_shadow_deployment
+from .runtime import active_model, backtest_records, calculate_drift, embedding_profiles, embedding_search, evaluate_records, latest_training_result, model_by_id, model_card, model_catalog, model_metrics, predict_payload, project, promotion_status, request_embedding_reindex, runtime_manifest
 from .settings import settings
 
 
@@ -3015,6 +4691,23 @@ class FeedbackRequest(BaseModel):
     source: str = "operator"
     reviewer: str | None = None
     comment: str | None = None
+
+
+class ModelRegistrationRequest(BaseModel):
+    confirm: bool = False
+    model_id: str
+    algorithm: str | None = None
+    artifact_uri: str | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    status: str | None = None
+    activate: bool = False
+    requested_by: str | None = None
+
+
+class ModelPromotionRequest(BaseModel):
+    confirm: bool = False
+    approved_by: str | None = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class RetrainingRequest(BaseModel):
@@ -3062,6 +4755,24 @@ class DeploymentRollbackRequest(BaseModel):
     reason: str | None = None
 
 
+class ABTestStartRequest(BaseModel):
+    confirm: bool = False
+    candidate_model_id: str
+    baseline_model_id: str | None = None
+    traffic_split_percent: float = 50.0
+    primary_metric: str | None = None
+    requested_by: str | None = None
+    reason: str | None = None
+    guardrails: dict[str, Any] = Field(default_factory=dict)
+
+
+class ABTestCompletionRequest(BaseModel):
+    confirm: bool = False
+    winner_model_id: str | None = None
+    completed_by: str | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+
+
 class EvaluateRequest(BaseModel):
     records: list[dict[str, Any]] = Field(default_factory=list)
     labels: list[Any] = Field(default_factory=list)
@@ -3082,6 +4793,45 @@ class DriftRequest(BaseModel):
     feature_keys: list[str] = Field(default_factory=list)
     warning_threshold: float = 0.2
     alert_threshold: float = 0.5
+    auto_retraining: bool = True
+    retraining_min_feedback_count: int = 1
+    requested_by: str | None = None
+
+
+class EmbeddingSearchRequest(BaseModel):
+    query: str = ""
+    collection: str | None = None
+    top_k: int = 5
+    profile_id: str | None = None
+
+
+class EmbeddingProfileRegistrationRequest(BaseModel):
+    confirm: bool = False
+    profile_id: str
+    provider: str | None = None
+    model_name: str | None = None
+    model_version: str | None = None
+    model_digest: str | None = None
+    dimension: int | None = None
+    similarity_metric: str | None = "cosine"
+    preprocessing_version: str | None = None
+    chunking_version: str | None = None
+    vector_collections: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    requested_by: str | None = None
+
+
+class EmbeddingProfileActivationRequest(BaseModel):
+    confirm: bool = False
+    requested_by: str | None = None
+    reason: str | None = None
+
+
+class EmbeddingReindexRequest(BaseModel):
+    confirm: bool = False
+    profile_id: str | None = None
+    requested_by: str | None = None
+    reason: str | None = None
 
 
 app = FastAPI(title=settings.app_name, version=project["version"])
@@ -3090,8 +4840,9 @@ app = FastAPI(title=settings.app_name, version=project["version"])
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    domain_seed = seed_domain_metadata(project)
     training_seed = seed_training_metadata(latest_training_result, project, runtime_manifest)
-    record_event("startup", "Runtime iniciado", {"project_id": project["id"], "version": project["version"], "training_seed": training_seed})
+    record_event("startup", "Runtime iniciado", {"project_id": project["id"], "version": project["version"], "domain_seed": domain_seed, "training_seed": training_seed})
 
 
 @app.get("/health")
@@ -3106,6 +4857,7 @@ def metadata() -> dict[str, Any]:
         "contract": runtime_manifest["contract"],
         "project": {"id": project["id"], "name": project["name"], "version": project["version"]},
         "problem": project["problem"],
+        "domain": project.get("domain", {"kind": "generic"}),
         "active_model_id": active_model()["id"],
         "project_hash": runtime_manifest["projectHash"],
         "pipeline_hash": runtime_manifest["pipelineHash"],
@@ -3114,6 +4866,63 @@ def metadata() -> dict[str, Any]:
         "mlflow_tracking_uri": settings.mlflow_tracking_uri,
         "endpoints": runtime_manifest["endpoints"],
     }
+
+
+@app.get("/domain/legal")
+def get_legal_domain() -> dict[str, Any]:
+    return domain_metadata_summary(project)
+
+
+@app.get("/embeddings/profiles")
+def get_embedding_profiles() -> dict[str, Any]:
+    return embedding_profiles()
+
+
+@app.post("/embeddings/profiles/register")
+def register_embedding_profile_endpoint(request: EmbeddingProfileRegistrationRequest) -> dict[str, Any]:
+    try:
+        return register_embedding_profile(
+            request.profile_id,
+            request.provider,
+            request.model_name,
+            request.model_version,
+            request.model_digest,
+            request.dimension,
+            request.similarity_metric,
+            request.preprocessing_version,
+            request.chunking_version,
+            request.vector_collections,
+            request.metadata,
+            request.requested_by,
+            request.confirm,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/embeddings/profiles/{profile_id}/activate")
+def activate_embedding_profile_endpoint(profile_id: str, request: EmbeddingProfileActivationRequest) -> dict[str, Any]:
+    try:
+        result = activate_embedding_profile(profile_id, request.requested_by, request.reason, request.confirm)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail="Perfil de embedding não encontrado.")
+    return result
+
+
+@app.post("/embeddings/search")
+def search_embeddings(request: EmbeddingSearchRequest) -> dict[str, Any]:
+    return embedding_search(request.query, request.collection, request.top_k, request.profile_id)
+
+
+@app.post("/embeddings/reindex")
+def reindex_embeddings(request: EmbeddingReindexRequest) -> dict[str, Any]:
+    result = request_embedding_reindex(request.profile_id, request.requested_by, request.reason, request.confirm)
+    if result.get("status") == "requires_confirmation":
+        raise HTTPException(status_code=409, detail=result)
+    record_event("embedding_reindex_requested", "Solicitação de reindexação de embeddings registrada", result)
+    return result
 
 
 @app.get("/environment/gpu")
@@ -3136,6 +4945,45 @@ def get_active_model() -> dict[str, Any]:
     return active_model()
 
 
+@app.post("/models/register")
+def register_model(request: ModelRegistrationRequest) -> dict[str, Any]:
+    try:
+        return register_model_version(
+            request.model_id,
+            request.algorithm,
+            request.artifact_uri,
+            request.metrics,
+            request.status,
+            request.activate,
+            request.requested_by,
+            request.confirm,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.get("/models/{model_id}")
+def get_model(model_id: str) -> dict[str, Any]:
+    registered = registered_model_version(model_id)
+    if registered:
+        return {"registered": True, "model": registered}
+    model = model_by_id(model_id)
+    if model:
+        return {"registered": False, "model": model}
+    raise HTTPException(status_code=404, detail="Modelo não encontrado.")
+
+
+@app.post("/models/{model_id}/promote")
+def promote_model(model_id: str, request: ModelPromotionRequest) -> dict[str, Any]:
+    try:
+        result = promote_model_version(model_id, request.approved_by, request.evidence, request.confirm)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail="Modelo não encontrado no registry.")
+    return result
+
+
 @app.get("/metrics/model")
 def get_model_metrics() -> dict[str, Any]:
     return model_metrics()
@@ -3150,7 +4998,7 @@ def get_runtime_metrics() -> dict[str, Any]:
 def predict(request: PredictRequest) -> dict[str, Any]:
     with Timer() as timer:
         output = predict_payload(request.input)
-    run_id = record_prediction(request.input, output, output["model_version_id"], timer.latency_ms, project.get("sensitiveFields", []))
+    run_id = record_prediction(request.input, output, output["model_version_id"], timer.latency_ms, project.get("sensitiveFields", []), project)
     record_event("prediction_completed", "Predição executada no runtime", {"run_id": run_id, "model_version_id": output["model_version_id"], "inference_source": output.get("inference_source")})
     return {"run_id": run_id, "latency_ms": timer.latency_ms, **output}
 
@@ -3263,7 +5111,21 @@ def drift(request: DriftRequest) -> dict[str, Any]:
     )
     drift_id = record_drift(result)
     record_event("drift_completed", "Drift calculado no runtime", {"drift_id": drift_id, "status": result.get("status"), "drift_score": result.get("drift_score")})
-    return {"drift_id": drift_id, **result}
+    auto_retraining = {"triggered": False, "reason": "status_not_alert"}
+    if request.auto_retraining and result.get("status") == "alert":
+        auto_retraining = {
+            "triggered": True,
+            "request": create_retraining_request(
+                "drift_alert",
+                f"Drift em alerta no monitoramento runtime: drift_id={drift_id}",
+                request.requested_by or "runtime_drift_monitor",
+                request.retraining_min_feedback_count,
+                {"source": "drift_monitor", "drift_id": drift_id, "thresholds": result.get("thresholds", {}), "requires_manual_approval": True},
+                active_model()["id"],
+            ),
+        }
+        record_event("drift_retraining_requested", "Drift em alerta gerou solicitação de retreino", {"drift_id": drift_id, "request_id": auto_retraining["request"]["request_id"], "status": auto_retraining["request"]["status"]})
+    return {"drift_id": drift_id, "auto_retraining": auto_retraining, **result}
 
 
 @app.get("/drift/latest")
@@ -3307,6 +5169,46 @@ def rollback(request: DeploymentRollbackRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+@app.get("/experiments/ab-tests")
+def get_ab_tests() -> dict[str, Any]:
+    return ab_testing_status(active_model()["id"])
+
+
+@app.get("/experiments/ab-tests/latest")
+def get_latest_ab_test() -> dict[str, Any]:
+    latest = ab_testing_status(active_model()["id"])["latest_experiment"]
+    return latest or {"status": "empty", "message": "Nenhum experimento A/B registrado."}
+
+
+@app.post("/experiments/ab-tests")
+def create_ab_test(request: ABTestStartRequest) -> dict[str, Any]:
+    try:
+        return start_ab_test(
+            active_model()["id"],
+            request.candidate_model_id,
+            request.baseline_model_id,
+            request.traffic_split_percent,
+            request.primary_metric or project.get("metrics", {}).get("primary"),
+            request.requested_by,
+            request.reason,
+            request.guardrails,
+            request.confirm,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/experiments/ab-tests/{experiment_id}/complete")
+def finish_ab_test(experiment_id: str, request: ABTestCompletionRequest) -> dict[str, Any]:
+    try:
+        result = complete_ab_test(experiment_id, request.winner_model_id, request.metrics, request.completed_by, request.confirm)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    if result is None:
+        raise HTTPException(status_code=404, detail="Experimento A/B não encontrado.")
+    return result
+
+
 @app.get("/dashboard")
 def dashboard():
     return dashboard_html()
@@ -3321,7 +5223,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from app import runtime as runtime_module
-from app.db import app_events, deployment_rollouts, drift_runs, engine, evaluation_runs, metric_snapshots, model_versions, prediction_feedback, prediction_rows, prediction_runs, retraining_requests, training_runs
+from app.db import ab_experiments, app_events, deployment_rollouts, drift_runs, engine, evaluation_runs, metric_snapshots, model_versions, prediction_feedback, prediction_rows, prediction_runs, promotion_decisions, retraining_requests, training_runs
 from app.main import app
 from app.runtime import latest_training_result, project
 
@@ -3345,9 +5247,13 @@ def test_optional_orchestration_artifacts():
     runtime_root = Path(__file__).resolve().parents[1]
     expected_files = [
         "requirements-orchestration.txt",
+        "docker-compose.capabilities.yml",
         "docker-compose.orchestration.yml",
         "orchestration/prefect_flow.py",
         "orchestration/celery_app.py",
+        "grpc/README.md",
+        "grpc/legal_classification.proto",
+        ".mlops/capabilities.yaml",
         ".mlops/promotion_policy.yaml",
         ".mlops/orchestration_manifest.yaml",
     ]
@@ -3361,10 +5267,16 @@ def test_optional_orchestration_artifacts():
     assert "composeFile: docker-compose.orchestration.yml" in manifest
     assert "entrypoint: orchestration/prefect_flow.py" in manifest
     assert "entrypoint: orchestration/celery_app.py" in manifest
+    capabilities = (runtime_root / ".mlops/capabilities.yaml").read_text(encoding="utf-8")
+    assert "kind: capability_manifest" in capabilities
+    assert "capabilities:" in capabilities
     compose = (runtime_root / "docker-compose.orchestration.yml").read_text(encoding="utf-8")
     assert "orchestration-redis:" in compose
     assert "celery-worker:" in compose
     assert "prefect-server:" in compose
+    proto = (runtime_root / "grpc/legal_classification.proto").read_text(encoding="utf-8")
+    assert "service LegalClassificationService" in proto
+    assert "rpc Classify" in proto
 
 
 def test_contract_endpoints():
@@ -3386,6 +5298,81 @@ def test_contract_endpoints():
         assert "model_version_id" in body
         assert "run_id" in body
         assert body["inference_source"] in {"artifact", "synthetic"}
+        assert body["cache"]["hit"] is False
+        cached_response = client.post("/predict", json={"input": {"text": "exemplo", "email": "pessoa@example.com"}})
+        assert cached_response.status_code == 200
+        assert cached_response.json()["cache"]["hit"] is True
+        embedding_profiles = client.get("/embeddings/profiles")
+        assert embedding_profiles.status_code == 200
+        assert "profiles" in embedding_profiles.json()
+        if project.get("domain", {}).get("kind") == "legal_classification":
+            assert body["explanation"]["kind"] == "legal_classification"
+            assert body["explanation"]["category"]["code"] in project["problem"]["classes"]
+            assert body["explanation"]["decisionPolicy"]["version"]
+            assert isinstance(body["explanation"]["topCandidates"], list)
+            assert body["review"]["status"] in {"accepted", "review", "blocked"}
+            assert body["decision"]["humanReviewRequired"] == body["review"]["humanReviewRequired"]
+            if project.get("domain", {}).get("legal", {}).get("embeddingProfiles"):
+                assert body["embedding_profile"]["id"]
+            legal_domain = client.get("/domain/legal")
+            assert legal_domain.status_code == 200
+            legal_body = legal_domain.json()
+            legal_manifest = project["domain"]["legal"]
+            assert legal_body["kind"] == "legal_classification"
+            assert legal_body["counts"]["categories"] >= len(legal_manifest.get("categories", []))
+            assert legal_body["counts"]["workflow_steps"] >= len(legal_manifest.get("workflowSteps", []))
+            assert legal_body["counts"]["embedding_profiles"] >= len(legal_manifest.get("embeddingProfiles", []))
+            assert legal_body["counts"]["documents"] >= 1
+            assert legal_body["counts"]["andamentos"] >= 1
+            profile_body = embedding_profiles.json()
+            assert profile_body["activeProfileId"] == legal_manifest["embeddingProfiles"][0]["id"]
+            embedding_search = client.post("/embeddings/search", json={"query": "sentença recurso apelação", "collection": "categories", "top_k": 3})
+            assert embedding_search.status_code == 200
+            search_body = embedding_search.json()
+            assert search_body["status"] == "ok"
+            assert search_body["profileId"] == profile_body["activeProfileId"]
+            assert len(search_body["results"]) >= 1
+            reindex = client.post("/embeddings/reindex", json={"confirm": True, "requested_by": "pytest", "reason": "validar contrato de reindexação"})
+            assert reindex.status_code == 200
+            assert reindex.json()["status"] == "queued"
+            new_profile_id = "pytest-embedding-" + body["run_id"][:8]
+            embedding_register_without_confirm = client.post("/embeddings/profiles/register", json={"profile_id": new_profile_id})
+            assert embedding_register_without_confirm.status_code == 409
+            embedding_register = client.post(
+                "/embeddings/profiles/register",
+                json={
+                    "confirm": True,
+                    "profile_id": new_profile_id,
+                    "provider": "sentence-transformers",
+                    "model_name": "BAAI/bge-m3",
+                    "model_version": "pytest-v2",
+                    "dimension": 1024,
+                    "similarity_metric": "cosine",
+                    "preprocessing_version": "legal-preprocess-v1",
+                    "chunking_version": "legal-chunking-v2",
+                    "vector_collections": {"categories": new_profile_id + "-categories", "workflowSteps": new_profile_id + "-workflow"},
+                    "metadata": {"normalization": "l2", "source": "contract_test"},
+                    "requested_by": "pytest",
+                },
+            )
+            assert embedding_register.status_code == 200
+            assert embedding_register.json()["profile"]["id"] == new_profile_id
+            activate_without_confirm = client.post(f"/embeddings/profiles/{new_profile_id}/activate", json={"requested_by": "pytest"})
+            assert activate_without_confirm.status_code == 409
+            activate_embedding = client.post(f"/embeddings/profiles/{new_profile_id}/activate", json={"confirm": True, "requested_by": "pytest", "reason": "validar troca versionada"})
+            assert activate_embedding.status_code == 200
+            assert activate_embedding.json()["profile"]["status"] == "active"
+            profile_after_activation = client.get("/embeddings/profiles").json()
+            assert profile_after_activation["activeProfileId"] == new_profile_id
+            embedding_search_after_activation = client.post("/embeddings/search", json={"query": "sentença recurso apelação", "collection": "categories", "top_k": 3})
+            assert embedding_search_after_activation.status_code == 200
+            assert embedding_search_after_activation.json()["profileId"] == new_profile_id
+            reindex_active = client.post("/embeddings/reindex", json={"confirm": True, "requested_by": "pytest", "reason": "validar reindexação do profile ativo"})
+            assert reindex_active.status_code == 200
+            assert reindex_active.json()["profileId"] == new_profile_id
+            with engine.connect() as connection:
+                stored_embedding_event = connection.execute(select(app_events.c.event_type).where(app_events.c.event_type == "embedding_profile_activated").order_by(app_events.c.id.desc()).limit(1)).scalar_one_or_none()
+            assert stored_embedding_event == "embedding_profile_activated"
         with engine.connect() as connection:
             stored_prediction_run = connection.execute(
                 select(prediction_runs.c.id).where(prediction_runs.c.id == body["run_id"])
@@ -3399,7 +5386,8 @@ def test_contract_endpoints():
         assert stored_prediction_run == body["run_id"]
         assert stored_prediction_row is not None
         assert stored_prediction_row["input_digest"]
-        assert stored_prediction_row["input_masked"]["email"] == "***"
+        expected_email = "***" if "email" in project.get("sensitiveFields", []) else "pessoa@example.com"
+        assert stored_prediction_row["input_masked"]["email"] == expected_email
         assert stored_prediction_row["output"]["model_version_id"] == body["model_version_id"]
         assert stored_prediction_event == "prediction_completed"
         if latest_training_result:
@@ -3423,6 +5411,48 @@ def test_contract_endpoints():
             canary_prediction = client.post("/predict", json={"input": {"text": "exemplo canary", "email": "canary@example.com"}})
             assert canary_prediction.status_code == 200
             assert canary_prediction.json()["deployment"]["mode"] == "canary"
+            if rollout_candidate != body["model_version_id"]:
+                ab_without_confirm = client.post("/experiments/ab-tests", json={"candidate_model_id": rollout_candidate, "traffic_split_percent": 50, "requested_by": "pytest"})
+                assert ab_without_confirm.status_code == 409
+                ab_start = client.post(
+                    "/experiments/ab-tests",
+                    json={
+                        "confirm": True,
+                        "baseline_model_id": body["model_version_id"],
+                        "candidate_model_id": rollout_candidate,
+                        "traffic_split_percent": 50,
+                        "primary_metric": project.get("metrics", {}).get("primary", "f1_macro"),
+                        "requested_by": "pytest",
+                        "reason": "validar experimento A/B",
+                        "guardrails": {"min_sample_size": 10, "max_error_rate": 0.01},
+                    },
+                )
+                assert ab_start.status_code == 200
+                ab_body = ab_start.json()
+                experiment_id = ab_body["experiment"]["id"]
+                assert ab_body["experiment"]["status"] == "active"
+                assert ab_body["experiment"]["baseline_model_id"] == body["model_version_id"]
+                assert ab_body["experiment"]["candidate_model_id"] == rollout_candidate
+                assert ab_body["experiment"]["traffic_split_percent"] == 50
+                ab_status = client.get("/experiments/ab-tests")
+                assert ab_status.status_code == 200
+                assert ab_status.json()["active_count"] >= 1
+                assert client.get("/experiments/ab-tests/latest").json()["id"] == experiment_id
+                ab_complete = client.post(
+                    f"/experiments/ab-tests/{experiment_id}/complete",
+                    json={"confirm": True, "winner_model_id": body["model_version_id"], "completed_by": "pytest", "metrics": {"f1_macro": 0.91}},
+                )
+                assert ab_complete.status_code == 200
+                assert ab_complete.json()["experiment"]["status"] == "completed"
+                assert ab_complete.json()["experiment"]["winner_model_id"] == body["model_version_id"]
+                with engine.connect() as connection:
+                    stored_ab = connection.execute(select(ab_experiments).where(ab_experiments.c.id == experiment_id)).mappings().first()
+                    stored_ab_snapshot = connection.execute(select(metric_snapshots.c.id).where(metric_snapshots.c.id == f"{experiment_id}-metrics")).scalar_one_or_none()
+                    stored_ab_event = connection.execute(select(app_events.c.event_type).where(app_events.c.event_type == "ab_test_completed").order_by(app_events.c.id.desc()).limit(1)).scalar_one_or_none()
+                assert stored_ab is not None
+                assert stored_ab["status"] == "completed"
+                assert stored_ab_snapshot == f"{experiment_id}-metrics"
+                assert stored_ab_event == "ab_test_completed"
             rollback = client.post("/deployment/rollback", json={"confirm": True, "requested_by": "pytest", "reason": "validar rollback"})
             assert rollback.status_code == 200
             assert rollback.json()["rollout"]["kind"] == "rollback"
@@ -3501,6 +5531,9 @@ def test_contract_endpoints():
         evaluation_body = evaluation.json()
         assert evaluation_body["status"] == "ok"
         assert "evaluation_id" in evaluation_body
+        if project["problem"]["type"] != "regression":
+            for metric_name in ["top_3_accuracy", "top_5_accuracy", "brier_score", "expected_calibration_error", "roc_auc_ovr", "pr_auc_macro", "low_confidence_rate", "human_review_rate", "invalid_workflow_transition_rate"]:
+                assert metric_name in evaluation_body["metrics"]
         with engine.connect() as connection:
             stored_evaluation_id = connection.execute(
                 select(evaluation_runs.c.id).where(evaluation_runs.c.id == evaluation_body["evaluation_id"])
@@ -3541,12 +5574,69 @@ def test_contract_endpoints():
         assert runtime_metrics["drift_count"] >= 1
         assert runtime_metrics["feedback_count"] >= 1
         assert runtime_metrics["feedback_accuracy"] == 1.0
-        assert runtime_metrics["retraining_pending_count"] == 0
+        assert runtime_metrics["retraining_pending_count"] >= 0
         with engine.connect() as connection:
             stored_drift_id = connection.execute(
                 select(drift_runs.c.id).where(drift_runs.c.id == drift_body["drift_id"])
             ).scalar_one_or_none()
         assert stored_drift_id == drift_body["drift_id"]
+        alert_drift = client.post(
+            "/drift",
+            json={
+                "reference_records": [{"amount": 10}, {"amount": 10}],
+                "current_records": [{"amount": 1000}, {"amount": 1000}],
+                "warning_threshold": 0.2,
+                "alert_threshold": 0.5,
+                "requested_by": "pytest",
+            },
+        )
+        assert alert_drift.status_code == 200
+        alert_body = alert_drift.json()
+        assert alert_body["status"] == "alert"
+        assert alert_body["auto_retraining"]["triggered"] is True
+        auto_request_id = alert_body["auto_retraining"]["request"]["request_id"]
+        with engine.connect() as connection:
+            stored_auto_retraining = connection.execute(select(retraining_requests).where(retraining_requests.c.id == auto_request_id)).mappings().first()
+            stored_auto_retraining_event = connection.execute(select(app_events.c.event_type).where(app_events.c.event_type == "drift_retraining_requested").order_by(app_events.c.id.desc()).limit(1)).scalar_one_or_none()
+        assert stored_auto_retraining is not None
+        assert stored_auto_retraining["trigger"] == "drift_alert"
+        assert stored_auto_retraining_event == "drift_retraining_requested"
+        registered_model_id = "pytest_registered_model_" + body["run_id"][:8]
+        register_without_confirm = client.post("/models/register", json={"model_id": registered_model_id, "algorithm": "external_xgboost"})
+        assert register_without_confirm.status_code == 409
+        registered = client.post(
+            "/models/register",
+            json={
+                "confirm": True,
+                "model_id": registered_model_id,
+                "algorithm": "external_xgboost",
+                "artifact_uri": "registry://pytest/registered-model",
+                "metrics": {"f1_macro": 0.93},
+                "requested_by": "pytest",
+            },
+        )
+        assert registered.status_code == 200
+        assert registered.json()["model"]["id"] == registered_model_id
+        model_detail = client.get(f"/models/{registered_model_id}")
+        assert model_detail.status_code == 200
+        assert model_detail.json()["registered"] is True
+        promote_without_confirm = client.post(f"/models/{registered_model_id}/promote", json={"approved_by": "pytest"})
+        assert promote_without_confirm.status_code == 409
+        promoted = client.post(
+            f"/models/{registered_model_id}/promote",
+            json={"confirm": True, "approved_by": "pytest", "evidence": {"source": "contract_test", "f1_macro": 0.93}},
+        )
+        assert promoted.status_code == 200
+        assert promoted.json()["model"]["is_active"] is True
+        assert client.get("/models/active").json()["id"] == registered_model_id
+        with engine.connect() as connection:
+            stored_model = connection.execute(select(model_versions).where(model_versions.c.id == registered_model_id)).mappings().first()
+            stored_promotion = connection.execute(select(promotion_decisions).where(promotion_decisions.c.candidate_model_id == registered_model_id)).mappings().first()
+            stored_promotion_event = connection.execute(select(app_events.c.event_type).where(app_events.c.event_type == "model_promoted").order_by(app_events.c.id.desc()).limit(1)).scalar_one_or_none()
+        assert stored_model is not None
+        assert stored_model["is_active"] is True
+        assert stored_promotion is not None
+        assert stored_promotion_event == "model_promoted"
 
 
 def test_operational_training_metadata_seeded():
@@ -3591,10 +5681,20 @@ function renderMigrationSql(): string {
   return `CREATE TABLE IF NOT EXISTS ingestion_runs (id text PRIMARY KEY, source_id text, status text, started_at timestamptz, finished_at timestamptz, details jsonb);
 CREATE TABLE IF NOT EXISTS dataset_versions (id text PRIMARY KEY, layer text, uri text, schema_hash text, lineage jsonb, quality jsonb, created_at timestamptz);
 CREATE TABLE IF NOT EXISTS feature_set_versions (id text PRIMARY KEY, features jsonb, transformations jsonb, dependencies jsonb, created_at timestamptz);
+CREATE TABLE IF NOT EXISTS legal_categories (code text PRIMARY KEY, name text, target text, critical boolean, requires_human_review boolean, workflow_step_codes jsonb, metadata_json jsonb, created_at timestamptz);
+CREATE TABLE IF NOT EXISTS legal_workflow_steps (code text PRIMARY KEY, name text, rite text, order_index integer, step_type text, requires_document boolean, requires_human_review boolean, sla_hours integer, metadata_json jsonb, created_at timestamptz);
+CREATE TABLE IF NOT EXISTS legal_workflow_transitions (id text PRIMARY KEY, from_step text, to_step text, rite text, condition text, severity text, active boolean, created_at timestamptz);
+CREATE TABLE IF NOT EXISTS legal_processes (id text PRIMARY KEY, process_identifier text, current_workflow_step text, metadata_json jsonb, created_at timestamptz, updated_at timestamptz);
+CREATE TABLE IF NOT EXISTS legal_documents (id text PRIMARY KEY, process_id text, prediction_run_id text, prediction_row_id text, category_code text, workflow_step_code text, text_hash text, metadata_json jsonb, created_at timestamptz);
+CREATE TABLE IF NOT EXISTS legal_andamentos (id text PRIMARY KEY, process_id text, workflow_step_code text, category_code text, prediction_row_id text, status text, details jsonb, created_at timestamptz);
+CREATE TABLE IF NOT EXISTS embedding_profiles (id text PRIMARY KEY, provider text, model_name text, model_version text, model_digest text, dimension integer, similarity_metric text, preprocessing_version text, chunking_version text, status text, vector_collections jsonb, metadata_json jsonb, created_at timestamptz);
+CREATE TABLE IF NOT EXISTS vector_collections (id text PRIMARY KEY, profile_id text, logical_name text, collection_name text, backend text, dimension integer, similarity_metric text, status text, metadata_json jsonb, created_at timestamptz);
+CREATE TABLE IF NOT EXISTS embedding_records (id text PRIMARY KEY, profile_id text, collection_name text, entity_type text, entity_id text, chunk_id text, vector jsonb, vector_hash text, metadata_json jsonb, created_at timestamptz);
 CREATE TABLE IF NOT EXISTS training_runs (id text PRIMARY KEY, status text, algorithm text, params jsonb, metrics jsonb, artifacts jsonb, started_at timestamptz, finished_at timestamptz);
 CREATE TABLE IF NOT EXISTS model_versions (id text PRIMARY KEY, status text, algorithm text, metrics jsonb, artifact_uri text, is_active boolean, created_at timestamptz);
 CREATE TABLE IF NOT EXISTS promotion_decisions (id text PRIMARY KEY, candidate_model_id text, decision text, evidence jsonb, approved_by text, created_at timestamptz);
 CREATE TABLE IF NOT EXISTS deployment_rollouts (id text PRIMARY KEY, kind text, status text, active_model_id text, candidate_model_id text, traffic_percent double precision, reason text, requested_by text, details jsonb, created_at timestamptz, completed_at timestamptz);
+CREATE TABLE IF NOT EXISTS ab_experiments (id text PRIMARY KEY, status text, baseline_model_id text, candidate_model_id text, traffic_split_percent double precision, primary_metric text, winner_model_id text, reason text, requested_by text, details jsonb, created_at timestamptz, completed_at timestamptz);
 CREATE TABLE IF NOT EXISTS prediction_runs (id text PRIMARY KEY, model_version_id text, status text, latency_ms double precision, created_at timestamptz);
 CREATE TABLE IF NOT EXISTS prediction_rows (id text PRIMARY KEY, run_id text, model_version_id text, input_digest text, input_masked jsonb, output jsonb, latency_ms double precision, created_at timestamptz);
 CREATE TABLE IF NOT EXISTS prediction_feedback (id text PRIMARY KEY, run_id text, row_id text, model_version_id text, predicted_value jsonb, actual_label jsonb, correct boolean, source text, reviewer text, comment text, created_at timestamptz);

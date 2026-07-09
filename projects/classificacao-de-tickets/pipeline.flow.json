@@ -1,0 +1,242 @@
+{
+  "id": "classificacao-de-tickets-pipeline",
+  "name": "Classificação de Tickets Pipeline",
+  "version": "0.1.0",
+  "contract": "mlops-flow-v1",
+  "description": "DAG inicial com fonte, pré-processamento, modelos candidatos, operador e decisão determinística.",
+  "nodes": [
+    {
+      "id": "input",
+      "type": "input",
+      "label": "Entrada",
+      "requires": [],
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {},
+      "dependencies": [],
+      "position": {
+        "x": 0,
+        "y": 160
+      }
+    },
+    {
+      "id": "source_csv",
+      "type": "data_source",
+      "label": "CSV",
+      "dataSourceId": "tickets_csv",
+      "requires": [],
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {},
+      "dependencies": [],
+      "position": {
+        "x": 220,
+        "y": 80
+      }
+    },
+    {
+      "id": "source_sql",
+      "type": "data_source",
+      "label": "SQL",
+      "dataSourceId": "warehouse_sql",
+      "requires": [],
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {},
+      "dependencies": [],
+      "position": {
+        "x": 220,
+        "y": 240
+      }
+    },
+    {
+      "id": "prepare_text",
+      "type": "preprocess",
+      "label": "Preparar texto",
+      "requires": [],
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {
+        "lower": true,
+        "strip": true
+      },
+      "dependencies": [],
+      "position": {
+        "x": 460,
+        "y": 160
+      }
+    },
+    {
+      "id": "bert_embeddings",
+      "type": "embedding",
+      "label": "Embeddings/BERT opcional",
+      "requires": [],
+      "framework": "sentence-transformers",
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {
+        "enabled": false,
+        "model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+      },
+      "dependencies": [
+        "sentence-transformers>=3,<4"
+      ],
+      "position": {
+        "x": 700,
+        "y": 80
+      }
+    },
+    {
+      "id": "xgboost_candidate",
+      "type": "model",
+      "label": "XGBoost candidato",
+      "requires": [],
+      "algorithm": "xgboost",
+      "framework": "xgboost",
+      "task": "multiclass_classification",
+      "modelRole": "candidate",
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {},
+      "dependencies": [
+        "xgboost>=2,<3"
+      ],
+      "position": {
+        "x": 940,
+        "y": 80
+      }
+    },
+    {
+      "id": "baseline_candidate",
+      "type": "model",
+      "label": "Baseline candidato",
+      "requires": [],
+      "algorithm": "logistic_regression",
+      "framework": "scikit-learn",
+      "task": "multiclass_classification",
+      "modelRole": "active",
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {},
+      "dependencies": [],
+      "position": {
+        "x": 940,
+        "y": 240
+      }
+    },
+    {
+      "id": "merge_predictions",
+      "type": "operator",
+      "label": "Operador de saídas",
+      "requires": [],
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {
+        "strategy": "best_metric_then_confidence"
+      },
+      "dependencies": [],
+      "position": {
+        "x": 1180,
+        "y": 160
+      }
+    },
+    {
+      "id": "deterministic_decider",
+      "type": "python_function",
+      "label": "Decisor determinístico",
+      "requires": [],
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {},
+      "python": {
+        "codeInline": "def run(input: dict, context: dict) -> dict:\n    score = input.get('confidence', 0)\n    if score < 0.55:\n        return {'decision': 'manual_review', 'reason': 'score_baixo'}\n    return {'decision': 'approve_prediction', 'reason': 'score_suficiente'}\n",
+        "entrypoint": "run",
+        "inputSchema": {},
+        "outputSchema": {},
+        "dependencies": [],
+        "networkPolicy": "none",
+        "isolationMode": "process",
+        "allowedHosts": [],
+        "mocks": []
+      },
+      "dependencies": [],
+      "position": {
+        "x": 1420,
+        "y": 160
+      }
+    },
+    {
+      "id": "output",
+      "type": "output",
+      "label": "Saída",
+      "requires": [],
+      "inputSchema": {},
+      "outputSchema": {},
+      "config": {},
+      "dependencies": [],
+      "position": {
+        "x": 1660,
+        "y": 160
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "input",
+      "to": "source_csv",
+      "mapping": {}
+    },
+    {
+      "from": "input",
+      "to": "source_sql",
+      "mapping": {}
+    },
+    {
+      "from": "source_csv",
+      "to": "prepare_text",
+      "mapping": {}
+    },
+    {
+      "from": "source_sql",
+      "to": "prepare_text",
+      "mapping": {}
+    },
+    {
+      "from": "prepare_text",
+      "to": "bert_embeddings",
+      "mapping": {}
+    },
+    {
+      "from": "bert_embeddings",
+      "to": "xgboost_candidate",
+      "mapping": {}
+    },
+    {
+      "from": "prepare_text",
+      "to": "baseline_candidate",
+      "mapping": {}
+    },
+    {
+      "from": "xgboost_candidate",
+      "to": "merge_predictions",
+      "mapping": {}
+    },
+    {
+      "from": "baseline_candidate",
+      "to": "merge_predictions",
+      "mapping": {}
+    },
+    {
+      "from": "merge_predictions",
+      "to": "deterministic_decider",
+      "mapping": {}
+    },
+    {
+      "from": "deterministic_decider",
+      "to": "output",
+      "mapping": {}
+    }
+  ],
+  "subgraphs": [],
+  "visual": {}
+}

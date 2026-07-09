@@ -23,9 +23,14 @@ mlops-spec/
 | Task | Go To | Load First |
 |------|-------|------------|
 | Alterar schema de projeto | `src/index.ts` | `../../docs/domain/CONTEXT.md` |
+| Alterar capacidades/providers opcionais | `src/index.ts` | `../../templates/CONTEXT.md` |
 | Alterar análise/diagnósticos | `src/index.ts` | `../../docs/plan.md` |
 | Alterar CLI | `src/cli.ts` | `src/index.ts` |
 | Validar exemplo | `../../examples/support_ticket_classification/` | `../../examples/CONTEXT.md` |
+
+## Capability Contract
+
+`PipelineNode` pode declarar `capability`, `requires` e `provider`. A inferência de capacidades deve continuar genérica: Qdrant, MLflow, worker e LLM são providers opcionais ativados pelo grafo ou por `runtime.capabilities.providers`, não camadas fixas do produto.
 
 ## Commands
 

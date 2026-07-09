@@ -50,8 +50,15 @@
     {
       "id": "bert_embeddings",
       "type": "embedding",
+      "capability": "embeddings",
       "label": "Embeddings/BERT opcional",
       "framework": "sentence-transformers",
+      "provider": {
+        "provider": "sentence-transformers",
+        "mode": "external",
+        "enabled": false,
+        "required": false
+      },
       "dependencies": ["sentence-transformers>=3,<4"],
       "position": { "x": 760, "y": 80 },
       "config": {
