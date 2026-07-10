@@ -46,7 +46,13 @@ import type {
   RuntimeSmokeResult,
 } from "./types.ts";
 
-export const controlApiUrl = import.meta.env.VITE_CONTROL_API_URL ?? "http://127.0.0.1:3334";
+const viteEnv = import.meta.env ?? {};
+export const controlApiUrl = viteEnv.VITE_CONTROL_API_URL ?? "http://127.0.0.1:3334";
+
+function controlApiToken(): string | undefined {
+  const desktopToken = window.mlopsDesktop?.apiToken?.trim();
+  return desktopToken || viteEnv.VITE_CONTROL_API_TOKEN?.trim() || undefined;
+}
 
 export interface TrainBaselineOptions {
   incremental?: boolean;
@@ -67,10 +73,22 @@ export async function listProjects(): Promise<{ projects: ProjectSummary[] }> {
   return request("/projects");
 }
 
-export async function createProject(): Promise<LoadedProject> {
+export interface ProjectTemplateSummary {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  validationCase: boolean;
+}
+
+export async function listProjectTemplates(): Promise<{ templates: ProjectTemplateSummary[] }> {
+  return request("/templates");
+}
+
+export async function createProject(input: { id?: string; name?: string; templateId?: string } = {}): Promise<LoadedProject> {
   return request("/projects", {
     method: "POST",
-    body: JSON.stringify({}),
+    body: JSON.stringify(input),
   });
 }
 
@@ -184,6 +202,13 @@ export async function savePipeline(projectId: string, pipeline: PipelineFlow): P
   return request(`/projects/${encodeURIComponent(projectId)}/pipeline`, {
     method: "PUT",
     body: JSON.stringify(pipeline),
+  });
+}
+
+export async function saveProjectBundle(projectId: string, project: MLOpsProject, pipeline: PipelineFlow): Promise<{ status: string; project: MLOpsProject; pipeline: PipelineFlow }> {
+  return request(`/projects/${encodeURIComponent(projectId)}/bundle`, {
+    method: "PUT",
+    body: JSON.stringify({ project, pipeline }),
   });
 }
 
@@ -495,10 +520,10 @@ export async function getDockerRuntimeInspect(outDir: string): Promise<DockerRun
   return request(`/runtime/docker/inspect?outDir=${encodeURIComponent(outDir)}`);
 }
 
-export async function smokeRuntime(baseUrl: string): Promise<RuntimeSmokeResult> {
+export async function smokeRuntime(baseUrl: string, outDir?: string): Promise<RuntimeSmokeResult> {
   return request("/runtime/docker/smoke", {
     method: "POST",
-    body: JSON.stringify({ baseUrl }),
+    body: JSON.stringify({ baseUrl, outDir }),
   });
 }
 
@@ -535,12 +560,17 @@ export async function runPlaywrightScrape(
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (!headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+  const authToken = controlApiToken();
+  if (authToken && !headers.has("authorization")) {
+    headers.set("authorization", `Bearer ${authToken}`);
+  }
   const response = await fetch(`${controlApiUrl}${path}`, {
     ...init,
-    headers: {
-      "content-type": "application/json",
-      ...init.headers,
-    },
+    headers,
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,8 @@ const preloadPath = path.join(currentDir, "preload.cjs");
 const apiHost = process.env.MLOPS_DESKTOP_CONTROL_API_HOST || process.env.HOST || "127.0.0.1";
 const apiPort = Number(process.env.MLOPS_DESKTOP_CONTROL_API_PORT || process.env.PORT || 3334);
 const apiBaseUrl = `http://${apiHost}:${apiPort}`;
+const apiToken = process.env.MLOPS_STUDIO_API_TOKEN?.trim() || randomBytes(32).toString("base64url");
+process.env.MLOPS_STUDIO_API_TOKEN = apiToken;
 const managedServices = process.env.MLOPS_DESKTOP_MANAGED_SERVICES !== "0";
 const smokeMode = process.env.MLOPS_DESKTOP_SMOKE === "1";
 
@@ -43,7 +46,7 @@ async function waitForUrl(url, timeoutMs) {
   let lastError = null;
   while (Date.now() - startedAt < timeoutMs) {
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { headers: { authorization: `Bearer ${apiToken}` } });
       if (response.ok) {
         return true;
       }
@@ -79,6 +82,7 @@ async function startControlApi() {
       HOST: apiHost,
       PORT: String(apiPort),
       MLOPS_STUDIO_WORKSPACE: workspaceRoot,
+      MLOPS_STUDIO_API_TOKEN: apiToken,
     },
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],

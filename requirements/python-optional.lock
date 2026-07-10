@@ -1,0 +1,5 @@
+# Perfil pesado opcional; não é instalado pelo bootstrap padrão.
+-r python.lock
+mlflow==3.14.0
+sentence-transformers==3.4.1
+xgboost==2.1.4

@@ -10,6 +10,7 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "./server.ts";
 
 const execFileAsync = promisify(execFile);
+const insecureTestApp = { allowInsecureNoAuth: true } as const;
 
 async function exists(targetPath: string): Promise<boolean> {
   try {
@@ -20,9 +21,130 @@ async function exists(targetPath: string): Promise<boolean> {
   }
 }
 
+test("control api exige Bearer token e restringe CORS à origem local", async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-security-"));
+  const authToken = "test-control-api-token-32-characters";
+  assert.throws(
+    () => buildApp({ workspaceRoot }),
+    /authentication is required/i,
+  );
+
+  const app = buildApp({ workspaceRoot, authToken });
+  try {
+    const missingToken = await app.inject({ method: "GET", url: "/health" });
+    assert.equal(missingToken.statusCode, 401);
+    assert.equal(missingToken.headers["www-authenticate"], "Bearer");
+
+    const rejectedOrigin = await app.inject({
+      method: "OPTIONS",
+      url: "/projects",
+      headers: { origin: "https://attacker.example" },
+    });
+    assert.equal(rejectedOrigin.statusCode, 403);
+    assert.equal(rejectedOrigin.headers["access-control-allow-origin"], undefined);
+
+    const preflight = await app.inject({
+      method: "OPTIONS",
+      url: "/projects",
+      headers: { origin: "http://127.0.0.1:5273" },
+    });
+    assert.equal(preflight.statusCode, 204);
+    assert.equal(preflight.headers["access-control-allow-origin"], "http://127.0.0.1:5273");
+    assert.match(String(preflight.headers["access-control-allow-headers"]), /authorization/);
+
+    const authorized = await app.inject({
+      method: "GET",
+      url: "/health",
+      headers: {
+        origin: "null",
+        authorization: `Bearer ${authToken}`,
+      },
+    });
+    assert.equal(authorized.statusCode, 200);
+    assert.equal(authorized.headers["access-control-allow-origin"], "null");
+  } finally {
+    await app.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("control api cria ids únicos e salva project/pipeline em um único bundle", async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-bundle-"));
+  await cp(path.join(process.cwd(), "templates"), path.join(workspaceRoot, "templates"), { recursive: true });
+  await cp(path.join(process.cwd(), "examples"), path.join(workspaceRoot, "examples"), { recursive: true });
+  const app = buildApp({ workspaceRoot, ...insecureTestApp });
+  try {
+    const templates = await app.inject({ method: "GET", url: "/templates" });
+    assert.equal(templates.statusCode, 200);
+    assert.equal(templates.json().templates.some((template: { id: string }) => template.id === "support_ticket_classification"), true);
+
+    const fromTemplate = await app.inject({
+      method: "POST",
+      url: "/projects",
+      payload: { name: "Suporte por template", templateId: "support_ticket_classification" },
+    });
+    assert.equal(fromTemplate.statusCode, 200, fromTemplate.body);
+    assert.equal(fromTemplate.json().pipeline.nodes.length, 11);
+    assert.equal(await exists(path.join(workspaceRoot, "projects", "suporte-por-template", "data", "tickets.csv")), true);
+
+    const first = await app.inject({ method: "POST", url: "/projects", payload: {} });
+    const second = await app.inject({ method: "POST", url: "/projects", payload: {} });
+    assert.equal(first.statusCode, 200);
+    assert.equal(second.statusCode, 200);
+    assert.notEqual(first.json().project.id, second.json().project.id);
+
+    const projectId = first.json().project.id as string;
+    const nextProject = { ...first.json().project, name: "Bundle persistido" };
+    const nextPipeline = { ...first.json().pipeline, name: "Pipeline persistido" };
+    const saved = await app.inject({
+      method: "PUT",
+      url: `/projects/${projectId}/bundle`,
+      payload: { project: nextProject, pipeline: nextPipeline },
+    });
+    assert.equal(saved.statusCode, 200, saved.body);
+
+    const loaded = await app.inject({ method: "GET", url: `/projects/${projectId}` });
+    assert.equal(loaded.json().project.name, "Bundle persistido");
+    assert.equal(loaded.json().pipeline.name, "Pipeline persistido");
+
+    const rejected = await app.inject({
+      method: "PUT",
+      url: `/projects/${projectId}/bundle`,
+      payload: { project: { ...nextProject, name: "Não deve persistir" }, pipeline: { nodes: [] } },
+    });
+    assert.notEqual(rejected.statusCode, 200);
+    const afterRejected = await app.inject({ method: "GET", url: `/projects/${projectId}` });
+    assert.equal(afterRejected.json().project.name, "Bundle persistido");
+  } finally {
+    await app.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("control api não lista nem lê arquivos de credencial em artefatos", async () => {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-artifact-security-"));
+  const outDir = path.join(workspaceRoot, "generated", "security-runtime");
+  await mkdir(outDir, { recursive: true });
+  await writeFile(path.join(outDir, "README.md"), "safe", "utf-8");
+  await writeFile(path.join(outDir, ".env"), "SECRET=unsafe", "utf-8");
+  await writeFile(path.join(outDir, "credentials.json"), "{}", "utf-8");
+  const app = buildApp({ workspaceRoot, ...insecureTestApp });
+  try {
+    const listing = await app.inject({ method: "GET", url: "/artifacts?outDir=generated/security-runtime" });
+    assert.equal(listing.statusCode, 200);
+    assert.deepEqual(listing.json().files.map((file: { path: string }) => file.path), ["README.md"]);
+
+    const blocked = await app.inject({ method: "GET", url: "/artifacts/file?outDir=generated/security-runtime&path=.env" });
+    assert.equal(blocked.statusCode, 404);
+  } finally {
+    await app.close();
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("control api exclui projeto com confirmacao explicita", async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-delete-"));
-  const app = buildApp({ workspaceRoot });
+  const app = buildApp({ workspaceRoot, ...insecureTestApp });
   try {
     const created = await app.inject({
       method: "POST",
@@ -59,6 +181,7 @@ test("control api cria, valida e gera runtime", async () => {
   const snapshotStoreRoot = path.join(workspaceRoot, "snapshot-store");
   const app = buildApp({
     workspaceRoot,
+    ...insecureTestApp,
     datasetSnapshotStoreRoot: snapshotStoreRoot,
     datasetSnapshotEncryptionKey: "test-snapshot-encryption-key",
     datasetSnapshotEncryptionKeyRef: "env:TEST_SNAPSHOT_KEY",
@@ -707,13 +830,15 @@ test("control api cria, valida e gera runtime", async () => {
     });
     assert.equal(importedZip.statusCode, 200);
     assert.equal(importedZip.json().sourceZip, "generated/demo-runtime.zip");
+    assert.equal(importedZip.json().quarantined, true);
     assert.equal(importedZip.json().project.id, "demo_zip_imported");
     assert.equal(importedZip.json().pipeline.nodes.length > 0, true);
     await stat(path.join(workspaceRoot, "projects", "demo_zip_imported", ".mlops", "runtime.manifest.json"));
 
     const importedZipRuns = await app.inject({ method: "GET", url: "/projects/demo_zip_imported/training-runs" });
     assert.equal(importedZipRuns.statusCode, 200);
-    assert.equal(importedZipRuns.json().latestRun.projectId, "demo_zip_imported");
+    assert.equal(importedZipRuns.json().latestRun, null);
+    await stat(path.join(workspaceRoot, "projects", "demo_zip_imported", ".mlops", "import-security.json"));
 
     const externalRuntimeRoot = path.join(workspaceRoot, "generated", "demo-external-runtime");
     await rm(externalRuntimeRoot, { recursive: true, force: true });
@@ -734,6 +859,10 @@ test("control api cria, valida e gera runtime", async () => {
     const gitRuntimeRoot = path.join(workspaceRoot, "generated", "demo-git-runtime");
     await rm(gitRuntimeRoot, { recursive: true, force: true });
     await cp(path.join(workspaceRoot, "generated", "demo-runtime"), gitRuntimeRoot, { recursive: true, force: true });
+    await mkdir(path.join(gitRuntimeRoot, ".mlops", "artifacts"), { recursive: true });
+    await writeFile(path.join(gitRuntimeRoot, ".mlops", "artifacts", "untrusted.pkl"), "malicious pickle placeholder");
+    await mkdir(path.join(gitRuntimeRoot, ".mlops", "custom_code"), { recursive: true });
+    await writeFile(path.join(gitRuntimeRoot, ".mlops", "custom_code", "untrusted.py"), "raise RuntimeError('must never be imported')\n");
     await execFileAsync("git", ["init"], { cwd: gitRuntimeRoot });
     await execFileAsync("git", ["config", "user.email", "studio@example.local"], { cwd: gitRuntimeRoot });
     await execFileAsync("git", ["config", "user.name", "MLOps Studio"], { cwd: gitRuntimeRoot });
@@ -753,9 +882,20 @@ test("control api cria, valida e gera runtime", async () => {
     assert.equal(importedGit.statusCode, 200, importedGit.body);
     assert.equal(importedGit.json().sourceGitUrl, "generated/demo-git-runtime");
     assert.equal(importedGit.json().importSource, "mlops_package");
+    assert.equal(importedGit.json().quarantined, true);
     assert.equal(importedGit.json().project.id, "demo_git_imported");
     assert.equal(importedGit.json().pipeline.nodes.length > 0, true);
     await stat(path.join(workspaceRoot, "projects", "demo_git_imported", ".mlops", "project.yaml"));
+    await stat(path.join(workspaceRoot, "projects", "demo_git_imported", ".mlops", "import-security.json"));
+    assert.equal(await exists(path.join(workspaceRoot, "projects", "demo_git_imported", ".mlops", "artifacts", "untrusted.pkl")), false);
+    assert.equal(await exists(path.join(workspaceRoot, "projects", "demo_git_imported", ".mlops", "custom_code", "untrusted.py")), false);
+    assert.equal(await exists(path.join(workspaceRoot, "projects", "demo_git_imported", ".mlops", "latest-training-result.json")), false);
+    for (const node of importedGit.json().pipeline.nodes as Array<{ python?: { codeInline?: string; codePath?: string } }>) {
+      if (node.python) {
+        assert.match(node.python.codeInline ?? "", /quarentena/);
+        assert.equal(node.python.codePath, undefined);
+      }
+    }
 
     const staticGitRuntimeRoot = path.join(workspaceRoot, "generated", "demo-static-git-runtime");
     await rm(staticGitRuntimeRoot, { recursive: true, force: true });
@@ -2280,7 +2420,7 @@ test("control api cria, valida e gera runtime", async () => {
       }, null, 2)}\n`,
       "utf-8",
     );
-    const restartedApp = buildApp({ workspaceRoot });
+    const restartedApp = buildApp({ workspaceRoot, ...insecureTestApp });
     try {
       const resumedJob = await waitForJob(restartedApp, resumableJobId);
       assert.equal(resumedJob.status, "completed", JSON.stringify(resumedJob));
@@ -2317,7 +2457,7 @@ test("control api cria, valida e gera runtime", async () => {
 test("control api executa scraping Playwright controlado em URL local", async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-scrape-"));
   const fixture = await startPlaywrightScrapeFixtureServer();
-  const app = buildApp({ workspaceRoot });
+  const app = buildApp({ workspaceRoot, ...insecureTestApp });
   const previousScrapePassword = process.env.MLOPS_FLOW_STUDIO_TEST_PASSWORD;
   process.env.MLOPS_FLOW_STUDIO_TEST_PASSWORD = "secret-password";
   try {
@@ -2565,6 +2705,7 @@ test("control api arquiva e restaura snapshots em storage S3/MinIO compatível",
   const fakeS3 = await startFakeS3Server();
   const app = buildApp({
     workspaceRoot,
+    ...insecureTestApp,
     datasetSnapshotStoreBackend: "s3",
     datasetSnapshotS3Bucket: "snapshot-bucket",
     datasetSnapshotS3Prefix: "mlops-prefix",
@@ -2661,7 +2802,7 @@ test("control api arquiva e restaura snapshots em storage S3/MinIO compatível",
 
 test("control api enfileira jobs quando a concorrência local está ocupada", async () => {
   const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-queue-"));
-  const app = buildApp({ workspaceRoot, workerJobConcurrency: 1 });
+  const app = buildApp({ workspaceRoot, workerJobConcurrency: 1, ...insecureTestApp });
   try {
     const created = await app.inject({
       method: "POST",
@@ -2720,6 +2861,7 @@ test("control api coordena fila filesystem compartilhada entre múltiplos hosts"
   const sharedQueueRoot = path.join(workspaceRoot, "shared-worker-queue");
   const appA = buildApp({
     workspaceRoot,
+    ...insecureTestApp,
     workerJobConcurrency: 1,
     workerJobQueueRoot: sharedQueueRoot,
     workerJobWorkerId: "host-a",
@@ -2756,6 +2898,7 @@ test("control api coordena fila filesystem compartilhada entre múltiplos hosts"
 
     appB = buildApp({
       workspaceRoot,
+      ...insecureTestApp,
       workerJobConcurrency: 1,
       workerJobQueueRoot: sharedQueueRoot,
       workerJobWorkerId: "host-b",
@@ -2804,6 +2947,7 @@ test("control api faz replay automático de snapshot em job distribuído quando 
   const sharedQueueRoot = path.join(workspaceRoot, "shared-worker-queue");
   const app = buildApp({
     workspaceRoot,
+    ...insecureTestApp,
     workerJobConcurrency: 1,
     workerJobQueueRoot: sharedQueueRoot,
     workerJobWorkerId: "replay-host",

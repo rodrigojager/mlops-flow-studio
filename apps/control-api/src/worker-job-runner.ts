@@ -87,7 +87,7 @@ async function runWorkerJob(options: { workspaceRoot: string; jobStoreRoot: stri
   state.workerPid = child.pid;
   await persistJobState(options.jobStoreRoot, state);
 
-  let latest = state;
+  const latest = state;
   let persistQueue = Promise.resolve();
   const persist = () => {
     persistQueue = persistQueue

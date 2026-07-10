@@ -1,9 +1,15 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright";
 
 const root = process.cwd();
+const auditWorkspace = await mkdtemp(path.join(os.tmpdir(), "mlops-flow-studio-visual-"));
+const apiToken = randomBytes(32).toString("base64url");
 const npmExecPath = process.env.npm_execpath;
 if (!npmExecPath) {
   throw new Error("npm_execpath não está definido; execute via npm run audit:visual.");
@@ -15,15 +21,19 @@ const uiUrl = `http://127.0.0.1:${uiPort}`;
 const started = [];
 
 try {
+  await prepareAuditWorkspace();
   started.push(startProcess("control-api", process.execPath, npmArgs(["run", "dev:control-api"]), {
     ...process.env,
     PORT: String(controlPort),
+    MLOPS_STUDIO_API_TOKEN: apiToken,
+    MLOPS_STUDIO_WORKSPACE: auditWorkspace,
   }));
-  await waitForJson(`${controlUrl}/health`, 30_000);
+  await waitForJson(`${controlUrl}/health`, 30_000, { authorization: `Bearer ${apiToken}` });
 
   started.push(startProcess("mlops-ui", process.execPath, npmArgs(["--workspace", "@mlops-flow-studio/mlops-ui", "run", "dev", "--", "--host", "127.0.0.1", "--port", String(uiPort)]), {
     ...process.env,
     VITE_CONTROL_API_URL: controlUrl,
+    VITE_CONTROL_API_TOKEN: apiToken,
   }));
   await waitForText(uiUrl, 30_000);
 
@@ -34,10 +44,22 @@ try {
   process.exitCode = 1;
 } finally {
   await Promise.allSettled(started.map((item) => item.stop()));
+  await rm(auditWorkspace, { recursive: true, force: true });
 }
 
 function npmArgs(args) {
   return [npmExecPath, ...args];
+}
+
+async function prepareAuditWorkspace() {
+  const sourceProject = path.join(root, "examples", "support_ticket_classification");
+  const targetProject = path.join(auditWorkspace, "projects", "support_ticket_classification");
+  const runtimeOutDir = path.join(auditWorkspace, "generated", "support-ticket-runtime");
+  await mkdir(path.dirname(targetProject), { recursive: true });
+  await cp(sourceProject, targetProject, { recursive: true, force: true });
+  const tsxCli = path.join(root, "node_modules", "tsx", "dist", "cli.mjs");
+  const codegenCli = path.join(root, "packages", "codegen-inference-api", "src", "cli.ts");
+  await runCommand(process.execPath, [tsxCli, codegenCli, "--project", targetProject, "--out", runtimeOutDir], root, 120_000);
 }
 
 async function auditUi(url) {
@@ -143,11 +165,23 @@ async function auditVisualSources(page) {
     throw new Error(`Inspector não preservou vínculo visual de fonte: ${visualSourceBinding}.`);
   }
 
+  const [saveResponse] = await Promise.all([
+    page.waitForResponse(
+      (candidate) => candidate.url().includes("/projects/support_ticket_classification/bundle") && candidate.request().method() === "PUT",
+      { timeout: 30_000 },
+    ),
+    page.getByRole("button", { name: /Salvar/i }).first().click(),
+  ]);
+  if (!saveResponse.ok()) {
+    throw new Error(`Salvar bundle falhou com status ${saveResponse.status()}.`);
+  }
+
   return {
     visualSourceTypes: ["csv", "sql", "api"],
     apiMockCardsBefore,
     apiMockCardsAfter,
     visualSourceBinding,
+    bundleSaveStatus: saveResponse.status(),
   };
 }
 
@@ -315,17 +349,17 @@ function runDetached(command, args) {
   });
 }
 
-async function waitForJson(url, timeoutMs) {
-  const text = await waitForText(url, timeoutMs);
+async function waitForJson(url, timeoutMs, headers = {}) {
+  const text = await waitForText(url, timeoutMs, headers);
   JSON.parse(text);
 }
 
-async function waitForText(url, timeoutMs) {
+async function waitForText(url, timeoutMs, headers = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastError = "";
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { headers });
       if (response.ok) {
         return await response.text();
       }
@@ -336,6 +370,28 @@ async function waitForText(url, timeoutMs) {
     await delay(500);
   }
   throw new Error(`Timeout aguardando ${url}: ${lastError}`);
+}
+
+function runCommand(command, args, cwd, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { cwd, env: process.env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${command} excedeu ${timeoutMs} ms.\n${output.slice(-4000)}`));
+    }, timeoutMs);
+    child.stdout.on("data", (chunk) => { output = (output + chunk.toString()).slice(-32_000); });
+    child.stderr.on("data", (chunk) => { output = (output + chunk.toString()).slice(-32_000); });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(output);
+      else reject(new Error(`${command} falhou com código ${code}.\n${output.slice(-4000)}`));
+    });
+  });
 }
 
 async function findFreePort(start, reserved = new Set()) {

@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,19 +10,12 @@ const workspaceRoot = path.resolve(currentDir, "../..");
 const apiHost = process.env.MLOPS_DESKTOP_CONTROL_API_HOST || "127.0.0.1";
 const apiPort = Number(process.env.MLOPS_DESKTOP_CONTROL_API_PORT || 3334);
 const uiHost = "127.0.0.1";
-const uiPort = 5273;
+const uiPort = Number(process.env.MLOPS_DESKTOP_UI_PORT || 5273);
 const apiBaseUrl = `http://${apiHost}:${apiPort}`;
 const uiUrl = `http://${uiHost}:${uiPort}`;
+const apiToken = process.env.MLOPS_STUDIO_API_TOKEN?.trim() || randomBytes(32).toString("base64url");
 const children = new Set();
-
-function npmBin() {
-  return process.platform === "win32" ? "npm.cmd" : "npm";
-}
-
-function localBin(name) {
-  const extension = process.platform === "win32" ? ".cmd" : "";
-  return path.join(workspaceRoot, "node_modules", ".bin", `${name}${extension}`);
-}
+const require = createRequire(import.meta.url);
 
 function log(scope, message) {
   console.log(`[desktop:${scope}] ${message}`);
@@ -52,7 +47,8 @@ async function waitForUrl(url, timeoutMs) {
   let lastError = null;
   while (Date.now() - startedAt < timeoutMs) {
     try {
-      const response = await fetch(url);
+      const headers = url.startsWith(apiBaseUrl) ? { authorization: `Bearer ${apiToken}` } : undefined;
+      const response = await fetch(url, { headers });
       if (response.ok) {
         return;
       }
@@ -92,19 +88,25 @@ process.on("SIGTERM", () => {
   process.exit(143);
 });
 
-const electronBin = localBin("electron");
-if (!existsSync(electronBin)) {
-  throw new Error(`Electron não encontrado em ${electronBin}. Execute npm install antes de iniciar o desktop.`);
+const tsxCli = path.join(workspaceRoot, "node_modules", "tsx", "dist", "cli.mjs");
+const viteCli = path.join(workspaceRoot, "node_modules", "vite", "bin", "vite.js");
+const electronBin = require("electron");
+for (const requiredPath of [tsxCli, viteCli, electronBin]) {
+  if (!existsSync(requiredPath)) {
+    throw new Error(`Dependência executável não encontrada em ${requiredPath}. Execute npm install antes de iniciar o desktop.`);
+  }
 }
 
-spawnManaged("api", npmBin(), ["run", "dev:control-api"], {
+spawnManaged("api", process.execPath, [tsxCli, "apps/control-api/src/server.ts"], {
   HOST: apiHost,
   PORT: String(apiPort),
   MLOPS_STUDIO_WORKSPACE: workspaceRoot,
+  MLOPS_STUDIO_API_TOKEN: apiToken,
 });
 
-spawnManaged("ui", npmBin(), ["run", "dev:mlops-ui"], {
+spawnManaged("ui", process.execPath, [viteCli, "--config", "apps/mlops-ui/vite.config.ts", "--host", uiHost, "--port", String(uiPort), "--strictPort"], {
   VITE_CONTROL_API_URL: apiBaseUrl,
+  VITE_CONTROL_API_TOKEN: apiToken,
 });
 
 await Promise.all([
@@ -117,6 +119,7 @@ const electron = spawnManaged("electron", electronBin, ["apps/desktop/main.mjs"]
   MLOPS_DESKTOP_MANAGED_SERVICES: "0",
   MLOPS_DESKTOP_CONTROL_API_HOST: apiHost,
   MLOPS_DESKTOP_CONTROL_API_PORT: String(apiPort),
+  MLOPS_STUDIO_API_TOKEN: apiToken,
 });
 
 electron.on("exit", (code) => {

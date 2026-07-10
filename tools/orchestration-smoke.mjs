@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import net from "node:net";
 import path from "node:path";
 
@@ -9,6 +10,7 @@ const venvDir = path.resolve(options.venvDir ?? ".mlops-studio/orchestration-smo
 const pythonBin = process.platform === "win32" ? path.join(venvDir, "Scripts", "python.exe") : path.join(venvDir, "bin", "python");
 const port = Number(options.port ?? await freePort());
 const baseUrl = `http://127.0.0.1:${port}`;
+const runtimeApiKey = randomBytes(32).toString("base64url");
 const startedAt = new Date().toISOString();
 const commands = [];
 
@@ -29,6 +31,7 @@ try {
     PREFECT_SERVER_ALLOW_EPHEMERAL_MODE: "true",
     CELERY_BROKER_URL: "memory://",
     CELERY_RESULT_BACKEND: "cache+memory://",
+    MLOPS_RUNTIME_API_KEY: runtimeApiKey,
   });
   commands.push(smoke);
   const parsedSmoke = JSON.parse(smoke.stdout.trim());
@@ -145,6 +148,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -159,6 +163,7 @@ logging.getLogger("prefect").disabled = True
 logging.getLogger("prefect._internal.concurrency").disabled = True
 
 request_log: list[dict[str, object]] = []
+runtime_api_key = os.environ["MLOPS_RUNTIME_API_KEY"]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -174,6 +179,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8")
         return json.loads(raw) if raw else {}
 
+    def _authorized(self) -> bool:
+        return self.headers.get("authorization") == "Bearer " + runtime_api_key
+
     def _send(self, status: int, body: dict[str, object]) -> None:
         payload = json.dumps(body).encode("utf-8")
         self.send_response(status)
@@ -183,6 +191,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self) -> None:
+        if not self._authorized():
+            self._send(401, {"error": "unauthorized"})
+            return
         path = urlparse(self.path).path
         request_log.append({"method": "GET", "path": path})
         responses = {
@@ -198,6 +209,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body)
 
     def do_POST(self) -> None:
+        if not self._authorized():
+            self._send(401, {"error": "unauthorized"})
+            return
         path = urlparse(self.path).path
         body = self._read_body()
         request_log.append({"method": "POST", "path": path, "body": body})

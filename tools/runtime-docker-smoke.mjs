@@ -1,21 +1,24 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import net from "node:net";
 
 const options = parseArgs(process.argv.slice(2));
 const outDir = path.resolve(options.outDir ?? "generated/support-ticket-runtime");
 const composePath = path.join(outDir, "docker-compose.yml");
 const apiPort = Number(options.apiPort ?? (options.baseUrl ? new URL(options.baseUrl).port || 8080 : await freePort()));
-const postgresPort = Number(options.postgresPort ?? await freePort());
 const baseUrl = options.baseUrl ?? `http://127.0.0.1:${apiPort}`;
+const runtimeApiKey = options.apiKey ?? randomBytes(32).toString("base64url");
+const postgresPassword = options.postgresPassword ?? randomBytes(24).toString("base64url");
 const timeoutMs = Number(options.timeoutMs ?? 600_000);
 const startedAt = new Date().toISOString();
 const commands = [];
 const composeEnv = {
   ...process.env,
   API_HOST_PORT: String(apiPort),
-  POSTGRES_HOST_PORT: String(postgresPort),
+  MLOPS_RUNTIME_API_KEY: runtimeApiKey,
+  POSTGRES_PASSWORD: postgresPassword,
 };
 
 try {
@@ -32,7 +35,6 @@ try {
     outDir: relative(outDir),
     baseUrl,
     apiPort,
-    postgresPort,
     startedAt,
     finishedAt: new Date().toISOString(),
     docker: { commands },
@@ -47,9 +49,8 @@ try {
   const report = {
     status: "error",
     outDir: relative(outDir),
-  baseUrl,
-  apiPort,
-  postgresPort,
+    baseUrl,
+    apiPort,
     startedAt,
     finishedAt: new Date().toISOString(),
     message: error instanceof Error ? error.message : String(error),
@@ -60,7 +61,7 @@ try {
   process.exitCode = 1;
 } finally {
   if (!options.keepUp) {
-    await runDocker(composeArgs(["down"]), process.cwd(), 120_000, composeEnv).catch((error) => {
+    await runDocker(composeArgs(["down", "--volumes", "--remove-orphans"]), process.cwd(), 120_000, composeEnv).catch((error) => {
       console.error(JSON.stringify({ status: "cleanup_error", message: error instanceof Error ? error.message : String(error) }, null, 2));
     });
   }
@@ -182,6 +183,14 @@ async function runSmokeChecks(baseUrl, timeoutMs) {
   const smokeModel = modelsBody.find((item) => isObject(item) && typeof item.id === "string" && item.id !== predictBody.model_version_id)
     ?? modelsBody.find((item) => isObject(item) && typeof item.id === "string");
   const smokeModelId = String(smokeModel?.id ?? predictBody.model_version_id ?? "");
+  const registryDetail = await check(baseUrl, "model_registry_detail", "GET", `/models/${encodeURIComponent(smokeModelId)}`, undefined, timeoutMs, (body) => isObject(body) && body.registered === true);
+  const candidateAlreadyRegistered = isObject(registryDetail.rawBody) && registryDetail.rawBody.registered === true;
+  if (!candidateAlreadyRegistered) {
+    const registrationCheck = await check(baseUrl, "model_registration", "POST", "/models/register", { confirm: true, model_id: smokeModelId, algorithm: "smoke_candidate", status: "candidate", requested_by: "smoke" }, timeoutMs, (body) => isObject(body) && isObject(body.model) && body.model.id === smokeModelId);
+    if (registrationCheck.status === "ok" || registrationCheck.statusCode !== 404) {
+      checks.push(registrationCheck);
+    }
+  }
   checks.push(await check(baseUrl, "deployment_status", "GET", "/deployment/status", undefined, timeoutMs, (body) => isObject(body) && body.status === "ok"));
   checks.push(await check(baseUrl, "deployment_shadow", "POST", "/deployment/shadow", { confirm: true, model_id: smokeModelId, requested_by: "smoke", reason: "Smoke operacional shadow." }, timeoutMs, (body) => isObject(body) && isObject(body.rollout) && body.rollout.kind === "shadow"));
   checks.push(await check(baseUrl, "deployment_shadow_predict", "POST", "/predict", { input: { text: "smoke ticket teste shadow", email: "shadow@example.com" } }, timeoutMs, (body) => isObject(body) && isObject(body.deployment) && body.deployment.mode === "shadow" && isObject(body.shadow_prediction)));
@@ -226,7 +235,10 @@ async function check(baseUrl, name, method, endpoint, body, timeoutMs, validate)
     const response = await fetch(url, {
       method,
       signal: controller.signal,
-      headers: body ? { "content-type": "application/json" } : undefined,
+      headers: {
+        authorization: `Bearer ${runtimeApiKey}`,
+        ...(body ? { "content-type": "application/json" } : {}),
+      },
       body: body ? JSON.stringify(body) : undefined,
     });
     const text = await response.text();

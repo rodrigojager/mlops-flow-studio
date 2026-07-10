@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/python.lock
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - run: npm ci
+      - run: npm run bootstrap:python
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:ui
+      - run: npm run test:worker
+      - run: npm run test:control-api
+      - run: npm run validate:example
+      - run: npm run validate:legal-example
+      - run: npm run test:generated
+      - run: npm run build:mlops-ui
+      - run: dotnet build projects/legal_ai_classification/dotnet/LegalAi.Reference.csproj --configuration Release
+      - run: dotnet run --project projects/legal_ai_classification/dotnet/tests/LegalAi.Contract.Tests/LegalAi.Contract.Tests.csproj --configuration Release --no-build
+
+  docker-runtime:
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run codegen:example
+      - run: npm run smoke:runtime:docker -- --outDir generated/support-ticket-runtime --waitMs 180000
+
+  visual-audit:
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run audit:visual

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import {
   Background,
   Controls,
@@ -82,6 +82,7 @@ import {
   installWorkerDependencies,
   listEvaluationRuns,
   listGeneratedArtifact,
+  listProjectTemplates,
   listProjects,
   listTrainingRuns,
   listWorkerJobs,
@@ -96,8 +97,7 @@ import {
   promoteRuntimeRetrainingJob,
   runPlaywrightScrape,
   runPythonNode,
-  savePipeline,
-  saveProject,
+  saveProjectBundle,
   setMlflowRegisteredModelAlias,
   smokeOpenApiOperation,
   smokeRuntime,
@@ -156,12 +156,31 @@ import type {
   WorkerJobQueueStatus,
   RuntimeSmokeResult,
 } from "./types.ts";
+import { NODE_TYPE_CATALOG, type NodeIconKey } from "./node-catalog.ts";
+import {
+  buildNodeExecutionStates,
+  edgeExecutionClass,
+  evaluationNodeIds,
+  isEvaluationResult,
+  isPythonRunResult,
+  isSourcePreviewResult,
+  isTrainingResult,
+  modelNodeIds,
+  modelNodeIdsById,
+  nodeExecutionStatusLabel,
+  nodeIdsForEvaluationResult,
+  nodeIdsForSource,
+  nodeIdsForTrainingResult,
+  sourcePreviewExecutionStatus,
+  uniqueStrings,
+  type NodeExecutionState,
+  type NodeExecutionStatus,
+} from "./execution-state.ts";
 
 type AppTab = "project" | "pipeline" | "studio" | "artifacts" | "runtime" | "settings";
 type StatusKind = "idle" | "busy" | "ok" | "error";
 type ThemeMode = "light" | "dark";
 type MlflowStage = "None" | "Staging" | "Production" | "Archived";
-type NodeExecutionStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "skipped";
 type PromotionRuleOperator = "eq" | "neq" | "gt" | "gte" | "lt" | "lte" | "between" | "contains" | "not_contains" | "improved_by" | "worse_by" | "delta_gte" | "delta_lte";
 type PromotionRuleSeverity = "block" | "review" | "alert";
 type PromotionRuleScope = "candidate" | "active" | "baseline" | "runtime" | "dataset" | "custom";
@@ -204,36 +223,34 @@ interface StatusState {
   message: string;
 }
 
-interface NodeExecutionState {
-  status: NodeExecutionStatus;
-  label: string;
-  detail?: string;
-  source: "job" | "result" | "manual";
-  jobId?: string;
-  updatedAt?: string;
-}
-
 interface FlowNodeData extends Record<string, unknown> {
   label: ReactNode;
   sublabel: string;
 }
 
-const nodeTypeOptions: Array<{ type: NodeType; label: string; icon: typeof Play }> = [
-  { type: "input", label: "Entrada", icon: Play },
-  { type: "data_source", label: "Fonte", icon: Database },
-  { type: "preprocess", label: "Preparo", icon: Table2 },
-  { type: "feature_transform", label: "Features", icon: Layers },
-  { type: "embedding", label: "Embedding", icon: Network },
-  { type: "model", label: "Modelo", icon: Gauge },
-  { type: "python_function", label: "Python", icon: Code2 },
-  { type: "operator", label: "Operador", icon: Split },
-  { type: "condition", label: "Condição", icon: GitBranch },
-  { type: "promotion_rule", label: "Promoção", icon: CheckCircle2 },
-  { type: "evaluation", label: "Avaliação", icon: BarChart3 },
-  { type: "monitoring", label: "Monitor", icon: Server },
-  { type: "composite", label: "Composto", icon: Boxes },
-  { type: "output", label: "Saída", icon: CircleDot },
-];
+const nodeIconByKey: Record<NodeIconKey, typeof Play> = {
+  play: Play,
+  database: Database,
+  table: Table2,
+  layers: Layers,
+  network: Network,
+  gauge: Gauge,
+  code: Code2,
+  split: Split,
+  branch: GitBranch,
+  check: CheckCircle2,
+  chart: BarChart3,
+  server: Server,
+  boxes: Boxes,
+  circle: CircleDot,
+  refresh: RefreshCw,
+};
+
+const nodeTypeOptions: Array<{ type: NodeType; label: string; icon: typeof Play }> = NODE_TYPE_CATALOG.map((entry) => ({
+  type: entry.type,
+  label: entry.label,
+  icon: nodeIconByKey[entry.icon],
+}));
 
 const tabs: Array<{ id: AppTab; label: string; icon: typeof Play }> = [
   { id: "project", label: "Projeto", icon: FileText },
@@ -355,6 +372,16 @@ export default function App() {
   const [projectJsonDraft, setProjectJsonDraft] = useState("");
   const [pipelineJsonDraft, setPipelineJsonDraft] = useState("");
   const [status, setStatus] = useState<StatusState>({ kind: "idle", message: "Control API aguardando." });
+  const selectedProjectIdRef = useRef(selectedProjectId);
+  const generatedOutDirRef = useRef(generatedOutDir);
+
+  useEffect(() => {
+    selectedProjectIdRef.current = selectedProjectId;
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    generatedOutDirRef.current = generatedOutDir;
+  }, [generatedOutDir]);
 
   useEffect(() => {
     window.localStorage.setItem(themeStorageKey, theme);
@@ -392,16 +419,19 @@ export default function App() {
     }
     try {
       const [runsResult, promotion, evaluations] = await Promise.all([listTrainingRuns(projectId), getPromotionStatus(projectId), listEvaluationRuns(projectId)]);
+      if (selectedProjectIdRef.current !== projectId) {
+        return;
+      }
       setTrainingRuns(runsResult.runs);
-      setTrainingResult((current) => current ?? runsResult.latestRun);
+      setTrainingResult(runsResult.latestRun);
       setEvaluationRuns(evaluations.runs);
-      setEvaluationResult((current) => current ?? evaluations.latestRun);
+      setEvaluationResult(evaluations.latestRun);
       setPromotionStatus(promotion);
       if (!silent) {
         setStatus({ kind: "ok", message: `${runsResult.runs.length} run(s) de treino.` });
       }
     } catch (error) {
-      if (!silent) {
+      if (!silent && selectedProjectIdRef.current === projectId) {
         setStatus({ kind: "error", message: errorMessage(error) });
       }
     }
@@ -431,12 +461,15 @@ export default function App() {
     }
     try {
       const result = await getDatasetSnapshotStatus(projectId);
+      if (selectedProjectIdRef.current !== projectId) {
+        return;
+      }
       setDatasetSnapshotStatus(result);
-      if (!silent) {
+      if (!silent && selectedProjectIdRef.current === projectId) {
         setStatus({ kind: "ok", message: `${result.local.manifestCount} manifesto(s), ${result.local.archivedRows} snapshot(s) arquivado(s).` });
       }
     } catch (error) {
-      if (!silent) {
+      if (!silent && selectedProjectIdRef.current === projectId) {
         setStatus({ kind: "error", message: errorMessage(error) });
       }
     }
@@ -448,13 +481,16 @@ export default function App() {
     }
     try {
       const [result, catalog] = await Promise.all([getMlflowStatus(projectId), getMlflowCatalog(projectId)]);
+      if (selectedProjectIdRef.current !== projectId) {
+        return;
+      }
       setMlflowStatus(result);
       setMlflowCatalog(catalog);
-      if (!silent) {
+      if (!silent && selectedProjectIdRef.current === projectId) {
         setStatus({ kind: result.health.reachable ? "ok" : "idle", message: result.health.reachable ? "MLflow disponível." : result.health.message });
       }
     } catch (error) {
-      if (!silent) {
+      if (!silent && selectedProjectIdRef.current === projectId) {
         setStatus({ kind: "error", message: errorMessage(error) });
       }
     }
@@ -545,18 +581,22 @@ export default function App() {
     if (!silent) {
       setStatus({ kind: "busy", message: "Checando Docker do runtime." });
     }
+    const projectIdAtRequest = selectedProjectIdRef.current;
     try {
       const [result, historyResult] = await Promise.all([
         getDockerRuntimeStatus(outDir),
         getDockerRuntimeHistory(outDir),
       ]);
+      if (selectedProjectIdRef.current !== projectIdAtRequest || generatedOutDirRef.current !== outDir) {
+        return;
+      }
       setDockerStatus(result);
       setDockerHistory(historyResult.history);
       if (!silent) {
         setStatus({ kind: result.canManage ? "ok" : "idle", message: result.canManage ? "Runtime Docker gerenciável." : "Runtime Docker ainda não está pronto." });
       }
     } catch (error) {
-      if (!silent) {
+      if (!silent && selectedProjectIdRef.current === projectIdAtRequest && generatedOutDirRef.current === outDir) {
         setStatus({ kind: "error", message: errorMessage(error) });
       }
     }
@@ -605,7 +645,12 @@ export default function App() {
     if (completedTrainingResult) {
       setTrainingResult(completedTrainingResult);
       setTrainingRuns((current) => [completedTrainingResult, ...current.filter((run) => run.runId !== completedTrainingResult.runId)]);
-      void getPromotionStatus(projectDraft.id).then(setPromotionStatus).catch(() => undefined);
+      const completedProjectId = projectDraft.id;
+      void getPromotionStatus(completedProjectId).then((result) => {
+        if (selectedProjectIdRef.current === completedProjectId) {
+          setPromotionStatus(result);
+        }
+      }).catch(() => undefined);
       void refreshMlflowStatus(projectDraft.id, true);
     }
     const completedEvaluationResult = workerJobs
@@ -657,7 +702,9 @@ export default function App() {
         setPipelineJsonDraft(JSON.stringify(result.pipeline, null, 2));
         setSelectedNodeId(result.pipeline.nodes[0]?.id ?? "");
         setSelectedEdgeId("");
-        setGeneratedOutDir(`generated/${result.project.id}-runtime`);
+        const nextOutDir = `generated/${result.project.id}-runtime`;
+        generatedOutDirRef.current = nextOutDir;
+        setGeneratedOutDir(nextOutDir);
         setRuntimeZipPath(`generated/${result.project.id}-runtime.zip`);
         setImportTargetProjectId(`${result.project.id}_reimported`);
         setArtifactListing(null);
@@ -683,7 +730,7 @@ export default function App() {
         setManualNodeExecutions({});
         void refreshTrainingState(result.project.id, true);
         void refreshDatasetSnapshots(result.project.id, true);
-        void refreshDockerStatus(`generated/${result.project.id}-runtime`, true);
+        void refreshDockerStatus(nextOutDir, true);
         void refreshMlflowStatus(result.project.id, true);
         setStatus({ kind: "ok", message: `${result.project.name} carregado.` });
       } catch (error) {
@@ -863,9 +910,28 @@ export default function App() {
   }, []);
 
   async function handleCreateProject() {
+    const name = window.prompt("Nome do novo projeto", "Novo projeto")?.trim();
+    if (!name) {
+      return;
+    }
+    let templateId: string | undefined;
+    try {
+      const catalog = await listProjectTemplates();
+      if (catalog.templates.length > 0) {
+        const choices = catalog.templates.map((template) => `${template.id} — ${template.name}`).join("\n");
+        const selected = window.prompt(`Template inicial (deixe vazio para um flow mínimo):\n\n${choices}`, catalog.templates[0].id);
+        if (selected === null) {
+          return;
+        }
+        templateId = selected.trim() || undefined;
+      }
+    } catch (error) {
+      setStatus({ kind: "error", message: errorMessage(error) });
+      return;
+    }
     setStatus({ kind: "busy", message: "Criando projeto." });
     try {
-      const result = await createProject();
+      const result = await createProject({ name, templateId });
       await refreshProjects(true);
       setSelectedProjectId(result.project.id);
       setStatus({ kind: "ok", message: `${result.project.name} criado.` });
@@ -902,16 +968,19 @@ export default function App() {
     }
   }
 
-  async function handleSave() {
+  async function saveDrafts() {
     if (!projectDraft || !pipelineDraft) {
-      return;
+      throw new Error("Nenhum projeto carregado para salvar.");
     }
+    await saveProjectBundle(projectDraft.id, projectDraft, pipelineDraft);
+    setProjectJsonDraft(JSON.stringify(projectDraft, null, 2));
+    setPipelineJsonDraft(JSON.stringify(pipelineDraft, null, 2));
+  }
+
+  async function handleSave() {
     setStatus({ kind: "busy", message: "Salvando arquivos." });
     try {
-      await saveProject(projectDraft.id, projectDraft);
-      await savePipeline(projectDraft.id, pipelineDraft);
-      setProjectJsonDraft(JSON.stringify(projectDraft, null, 2));
-      setPipelineJsonDraft(JSON.stringify(pipelineDraft, null, 2));
+      await saveDrafts();
       setStatus({ kind: "ok", message: "Projeto e pipeline salvos." });
       await refreshProjects(true);
     } catch (error) {
@@ -925,7 +994,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: "Validando contratos." });
     try {
-      await handleSave();
+      await saveDrafts();
       const result = await validateProject(projectDraft.id);
       setValidation(result);
       setStatus({
@@ -943,8 +1012,9 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: "Gerando runtime FastAPI." });
     try {
-      await handleSave();
+      await saveDrafts();
       const result = await generateProject(projectDraft.id, generatedOutDir);
+      generatedOutDirRef.current = result.outDir;
       setGeneratedOutDir(result.outDir);
       setRuntimeZipPath(`${result.outDir}.zip`);
       setDockerLogs(null);
@@ -1126,7 +1196,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Iniciando job de preview ${sourceId}.` });
     try {
-      await handleSave();
+      await saveDrafts();
       const job = await startSourcePreviewJob(projectDraft.id, sourceId, 10, real ? "real" : "safe");
       setWorkerJobs((current) => [job, ...current.filter((item) => item.jobId !== job.jobId)]);
       setActiveTab("studio");
@@ -1153,7 +1223,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `${incremental ? "Retreinando incremental" : "Treinando baseline"} ${sourceId ? `com ${sourceId}` : "local"}.` });
     try {
-      await handleSave();
+      await saveDrafts();
       const defaultSource = projectDraft.dataSources.find((source) => source.type === "csv") ?? projectDraft.dataSources[0];
       const selectedSourceId = sourceId ?? defaultSource?.id;
       const result = await trainBaseline(projectDraft.id, selectedSourceId, real ? "real" : "safe", incremental ? { incremental: true, previousRunId: baseRunId } : {});
@@ -1193,7 +1263,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Iniciando job de ${incremental ? "retreino incremental" : "treino"} ${sourceId ? `com ${sourceId}` : "local"}.` });
     try {
-      await handleSave();
+      await saveDrafts();
       const defaultSource = projectDraft.dataSources.find((source) => source.type === "csv") ?? projectDraft.dataSources[0];
       const selectedSourceId = sourceId ?? defaultSource?.id;
       const job = await startTrainBaselineJob(projectDraft.id, selectedSourceId, real ? "real" : "safe", incremental ? { incremental: true, previousRunId: baseRunId } : {});
@@ -1219,7 +1289,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Avaliando ${modelId}.` });
     try {
-      await handleSave();
+      await saveDrafts();
       const result = await evaluateModel(projectDraft.id, trainingResult.runId, modelId, sourceId, real ? "real" : "safe");
       setEvaluationResult(result);
       markManualNodeExecution(nodeIdsForEvaluationResult(pipelineDraft, result), {
@@ -1249,7 +1319,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Iniciando job de avaliação ${modelId}.` });
     try {
-      await handleSave();
+      await saveDrafts();
       const job = await startEvaluateModelJob(projectDraft.id, trainingResult.runId, modelId, sourceId, real ? "real" : "safe");
       setWorkerJobs((current) => [job, ...current.filter((item) => item.jobId !== job.jobId)]);
       setActiveTab("studio");
@@ -1280,7 +1350,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Executando backtest de ${modelIds.length} modelo(s).` });
     try {
-      await handleSave();
+      await saveDrafts();
       const result = await backtestModels(projectDraft.id, trainingResult.runId, modelIds, baselineModelId, sourceId, real ? "real" : "safe", 0.001, temporalWindow.value);
       setEvaluationResult(result);
       markManualNodeExecution(nodeIdsForEvaluationResult(pipelineDraft, result), {
@@ -1317,7 +1387,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Iniciando job de backtest com ${modelIds.length} modelo(s).` });
     try {
-      await handleSave();
+      await saveDrafts();
       const job = await startBacktestModelsJob(projectDraft.id, trainingResult.runId, modelIds, baselineModelId, sourceId, real ? "real" : "safe", 0.001, temporalWindow.value);
       setWorkerJobs((current) => [job, ...current.filter((item) => item.jobId !== job.jobId)]);
       setActiveTab("studio");
@@ -1384,9 +1454,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Aplicando promoção de ${promotionStatus.candidateModelId}.` });
     try {
-      await saveProject(projectDraft.id, projectDraft);
-      await savePipeline(projectDraft.id, pipelineDraft);
-      setProjectJsonDraft(JSON.stringify(projectDraft, null, 2));
+      await saveDrafts();
       const result = await applyPromotion(projectDraft.id, promotionStatus.latestRunId, promotionStatus.candidateModelId);
       setPipelineDraft(result.pipeline);
       setPipelineJsonDraft(JSON.stringify(result.pipeline, null, 2));
@@ -1413,9 +1481,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Aplicando promoção do retreino ${jobId}.` });
     try {
-      await saveProject(projectDraft.id, projectDraft);
-      await savePipeline(projectDraft.id, pipelineDraft);
-      setProjectJsonDraft(JSON.stringify(projectDraft, null, 2));
+      await saveDrafts();
       const result = await promoteRuntimeRetrainingJob(projectDraft.id, jobId, candidateModelId);
       setPipelineDraft(result.pipeline);
       setPipelineJsonDraft(JSON.stringify(result.pipeline, null, 2));
@@ -1476,7 +1542,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Iniciando job Python ${selectedNode.id}.` });
     try {
-      await handleSave();
+      await saveDrafts();
       const input = JSON.parse(pythonInputDraft) as Record<string, unknown>;
       const job = await startPythonNodeJob(projectDraft.id, selectedNode.id, input);
       setWorkerJobs((current) => [job, ...current.filter((item) => item.jobId !== job.jobId)]);
@@ -1554,7 +1620,7 @@ export default function App() {
   async function handleSmokeRuntime() {
     setStatus({ kind: "busy", message: "Executando smoke do runtime." });
     try {
-      const result = await smokeRuntime(runtimeBaseUrl);
+      const result = await smokeRuntime(runtimeBaseUrl, generatedOutDir);
       setRuntimeSmokeResult(result);
       const summary = result.summary ? `${result.summary.passed}/${result.summary.total}` : `${result.statusCode ?? "sem resposta"}`;
       setStatus({ kind: result.status === "ok" ? "ok" : "error", message: `Smoke ${result.status}: ${summary}.` });
@@ -1761,7 +1827,7 @@ export default function App() {
     const approvedRequest = latestApprovedRuntimeRetrainingRequest(remoteRuntimeInspection);
     setStatus({ kind: "busy", message: "Iniciando job de retreino aprovado pelo runtime." });
     try {
-      await handleSave();
+      await saveDrafts();
       const job = await startRuntimeRetrainingJob(projectDraft.id, remoteRuntimeUrl, {
         requestId: approvedRequest?.requestId ?? null,
         sourceId: selectedSourceId ?? null,
@@ -1787,7 +1853,7 @@ export default function App() {
     }
     setStatus({ kind: "busy", message: `Executando ${selectedNode.id}.` });
     try {
-      await handleSave();
+      await saveDrafts();
       const input = JSON.parse(pythonInputDraft) as Record<string, unknown>;
       const result = await runPythonNode(projectDraft.id, selectedNode.id, input);
       setPythonRunResult(result);
@@ -5471,310 +5537,6 @@ function workerEventDetail(event: WorkerJob["events"][number]): string {
     .join(" · ");
 }
 
-function isTrainingResult(value: unknown): value is TrainingResult {
-  return typeof value === "object"
-    && value !== null
-    && (value as { kind?: unknown }).kind === "training_result"
-    && typeof (value as { runId?: unknown }).runId === "string";
-}
-
-function isEvaluationResult(value: unknown): value is EvaluationResult {
-  return typeof value === "object"
-    && value !== null
-    && ((value as { kind?: unknown }).kind === "evaluation_result" || (value as { kind?: unknown }).kind === "backtest_result")
-    && typeof (value as { evaluationId?: unknown }).evaluationId === "string";
-}
-
-function isSourcePreviewResult(value: unknown): value is SourcePreviewResult {
-  return typeof value === "object"
-    && value !== null
-    && (value as { kind?: unknown }).kind === "source_preview"
-    && typeof (value as { sourceId?: unknown }).sourceId === "string";
-}
-
-function isPythonRunResult(value: unknown): value is PythonRunResult {
-  return typeof value === "object"
-    && value !== null
-    && (value as { kind?: unknown }).kind === "python_block_result"
-    && typeof (value as { nodeId?: unknown }).nodeId === "string";
-}
-
-function buildNodeExecutionStates(
-  pipeline: PipelineFlow | null,
-  input: {
-    manualNodeExecutions: Record<string, NodeExecutionState>;
-    workerJobs: WorkerJob[];
-    sourcePreview: SourcePreviewResult | null;
-    pythonRunResult: PythonRunResult | null;
-    trainingResult: TrainingResult | null;
-    evaluationResult: EvaluationResult | null;
-  },
-): Map<string, NodeExecutionState> {
-  const states = new Map<string, NodeExecutionState>();
-  if (!pipeline) {
-    return states;
-  }
-
-  if (input.sourcePreview) {
-    mergeExecutionStateForNodes(states, nodeIdsForSource(pipeline, input.sourcePreview.sourceId), {
-      status: sourcePreviewExecutionStatus(input.sourcePreview),
-      label: "Preview",
-      detail: input.sourcePreview.message ?? `${input.sourcePreview.rowCount ?? 0} linha(s)`,
-      source: "result",
-    });
-  }
-  if (input.pythonRunResult) {
-    mergeExecutionStateForNodes(states, [input.pythonRunResult.nodeId], {
-      status: input.pythonRunResult.status === "ok" ? "completed" : "failed",
-      label: "Python",
-      detail: `${input.pythonRunResult.durationMs} ms`,
-      source: "result",
-    });
-  }
-  if (input.trainingResult) {
-    mergeExecutionStateForNodes(states, nodeIdsForTrainingResult(pipeline, input.trainingResult), {
-      status: input.trainingResult.status === "ok" ? "completed" : "failed",
-      label: "Treino",
-      detail: `melhor modelo ${input.trainingResult.bestModelId}`,
-      source: "result",
-      updatedAt: input.trainingResult.updatedAt ?? input.trainingResult.createdAt,
-    });
-  }
-  if (input.evaluationResult) {
-    mergeExecutionStateForNodes(states, nodeIdsForEvaluationResult(pipeline, input.evaluationResult), {
-      status: input.evaluationResult.status === "ok" ? "completed" : "failed",
-      label: input.evaluationResult.kind === "backtest_result" ? "Backtest" : "Avaliação",
-      detail: input.evaluationResult.recommendation ?? `${input.evaluationResult.primaryMetric} ${String(input.evaluationResult.metrics[input.evaluationResult.primaryMetric] ?? "-")}`,
-      source: "result",
-      updatedAt: input.evaluationResult.updatedAt ?? input.evaluationResult.createdAt,
-    });
-  }
-
-  for (const [nodeId, state] of Object.entries(input.manualNodeExecutions)) {
-    mergeExecutionState(states, nodeId, state);
-  }
-
-  const sortedJobs = [...input.workerJobs].sort((left, right) => executionTimestamp(left.startedAt) - executionTimestamp(right.startedAt));
-  for (const job of sortedJobs) {
-    mergeExecutionStateForNodes(states, nodeIdsForWorkerJob(pipeline, job), {
-      status: workerJobNodeStatus(job),
-      label: job.label ?? workerJobCommandLabel(job.command),
-      detail: job.error ?? latestWorkerEventMessage(job) ?? job.label,
-      source: "job",
-      jobId: job.jobId,
-      updatedAt: job.finishedAt ?? job.runnerStartedAt ?? job.queuedAt ?? job.startedAt,
-    });
-  }
-
-  return states;
-}
-
-function mergeExecutionStateForNodes(states: Map<string, NodeExecutionState>, nodeIds: string[], state: NodeExecutionState): void {
-  for (const nodeId of uniqueStrings(nodeIds)) {
-    mergeExecutionState(states, nodeId, state);
-  }
-}
-
-function mergeExecutionState(states: Map<string, NodeExecutionState>, nodeId: string, next: NodeExecutionState): void {
-  if (!nodeId) {
-    return;
-  }
-  const current = states.get(nodeId);
-  if (!current) {
-    states.set(nodeId, next);
-    return;
-  }
-  if (next.status === "running" && current.status !== "running") {
-    states.set(nodeId, next);
-    return;
-  }
-  if (current.status === "running" && next.status !== "running" && executionTimestamp(next.updatedAt) < executionTimestamp(current.updatedAt)) {
-    return;
-  }
-  const currentTime = executionTimestamp(current.updatedAt);
-  const nextTime = executionTimestamp(next.updatedAt);
-  if (nextTime > currentTime || (nextTime === currentTime && executionStatusPriority(next.status) >= executionStatusPriority(current.status))) {
-    states.set(nodeId, next);
-  }
-}
-
-function executionStatusPriority(status: NodeExecutionStatus): number {
-  if (status === "running") {
-    return 6;
-  }
-  if (status === "failed") {
-    return 5;
-  }
-  if (status === "queued") {
-    return 4;
-  }
-  if (status === "cancelled") {
-    return 3;
-  }
-  if (status === "completed") {
-    return 2;
-  }
-  return 1;
-}
-
-function executionTimestamp(value: string | undefined): number {
-  if (!value) {
-    return 0;
-  }
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? 0 : parsed;
-}
-
-function nodeIdsForSource(pipeline: PipelineFlow | null, sourceId: string | undefined): string[] {
-  if (!pipeline || !sourceId) {
-    return [];
-  }
-  return pipeline.nodes.filter((node) => node.type === "data_source" && node.dataSourceId === sourceId).map((node) => node.id);
-}
-
-function modelNodeIds(pipeline: PipelineFlow | null): string[] {
-  return pipeline?.nodes.filter((node) => node.type === "model").map((node) => node.id) ?? [];
-}
-
-function modelNodeIdsById(pipeline: PipelineFlow | null, modelIds: Array<string | undefined | null>): string[] {
-  if (!pipeline) {
-    return [];
-  }
-  const requested = new Set(modelIds.filter((item): item is string => !!item));
-  return pipeline.nodes.filter((node) => node.type === "model" && requested.has(node.id)).map((node) => node.id);
-}
-
-function evaluationNodeIds(pipeline: PipelineFlow | null): string[] {
-  return pipeline?.nodes.filter((node) => node.type === "evaluation" || node.type === "promotion_rule").map((node) => node.id) ?? [];
-}
-
-function nodeIdsForTrainingResult(pipeline: PipelineFlow | null, result: TrainingResult): string[] {
-  const trainedModelIds = result.leaderboard.map((row) => row.modelId);
-  const trainedModels = modelNodeIdsById(pipeline, trainedModelIds);
-  return [...nodeIdsForSource(pipeline, result.sourceId), ...(trainedModels.length ? trainedModels : modelNodeIds(pipeline))];
-}
-
-function nodeIdsForEvaluationResult(pipeline: PipelineFlow | null, result: EvaluationResult): string[] {
-  const modelIds = uniqueStrings([
-    result.modelId ?? undefined,
-    result.baselineModelId,
-    result.recommendedModelId,
-    ...(result.candidateModelIds ?? []),
-    ...Object.keys(result.modelMetrics ?? {}),
-  ]);
-  const models = modelNodeIdsById(pipeline, modelIds);
-  return [...nodeIdsForSource(pipeline, result.sourceId), ...(models.length ? models : modelNodeIds(pipeline)), ...evaluationNodeIds(pipeline)];
-}
-
-function nodeIdsForWorkerJob(pipeline: PipelineFlow | null, job: WorkerJob): string[] {
-  if (!pipeline) {
-    return [];
-  }
-  if (job.command === "run-python-block" && job.nodeId) {
-    return [job.nodeId];
-  }
-  if (job.command === "preview-source") {
-    return nodeIdsForSource(pipeline, job.sourceId);
-  }
-  if (job.command === "train-baseline") {
-    return [...nodeIdsForSource(pipeline, job.sourceId), ...modelNodeIds(pipeline)];
-  }
-  if (job.command === "evaluate-model" || job.command === "backtest-models") {
-    return [...nodeIdsForSource(pipeline, job.sourceId), ...modelNodeIds(pipeline), ...evaluationNodeIds(pipeline)];
-  }
-  return [];
-}
-
-function sourcePreviewExecutionStatus(result: SourcePreviewResult): NodeExecutionStatus {
-  if (result.status === "ok") {
-    return "completed";
-  }
-  if (result.status === "missing" || result.status === "contract") {
-    return "skipped";
-  }
-  return "failed";
-}
-
-function workerJobNodeStatus(job: WorkerJob): NodeExecutionStatus {
-  if (job.status === "completed") {
-    if (isSourcePreviewResult(job.result)) {
-      return sourcePreviewExecutionStatus(job.result);
-    }
-    if (isRecord(job.result) && job.result.status === "error") {
-      return "failed";
-    }
-    return "completed";
-  }
-  if (job.status === "queued" || job.status === "running" || job.status === "failed" || job.status === "cancelled") {
-    return job.status;
-  }
-  return "skipped";
-}
-
-function workerJobCommandLabel(command: WorkerJob["command"]): string {
-  if (command === "run-python-block") {
-    return "Python";
-  }
-  if (command === "preview-source") {
-    return "Preview";
-  }
-  if (command === "train-baseline") {
-    return "Treino";
-  }
-  if (command === "evaluate-model") {
-    return "Avaliação";
-  }
-  return "Backtest";
-}
-
-function latestWorkerEventMessage(job: WorkerJob): string | undefined {
-  const latest = job.events[job.events.length - 1];
-  return latest?.message;
-}
-
-function edgeExecutionClass(source: NodeExecutionState | undefined, target: NodeExecutionState | undefined): string {
-  if (source?.status === "running" || target?.status === "running") {
-    return "edge-running";
-  }
-  if (
-    target?.status === "failed"
-    || source?.status === "failed"
-    || target?.status === "cancelled"
-    || source?.status === "cancelled"
-  ) {
-    return "edge-failed";
-  }
-  if (source?.status === "skipped" || target?.status === "skipped") {
-    return "edge-skipped";
-  }
-  if (source?.status === "completed" && target?.status === "completed") {
-    return "edge-executed";
-  }
-  return "";
-}
-
-function nodeExecutionStatusLabel(status: NodeExecutionStatus): string {
-  if (status === "queued") {
-    return "na fila";
-  }
-  if (status === "running") {
-    return "rodando";
-  }
-  if (status === "completed") {
-    return "concluído";
-  }
-  if (status === "failed") {
-    return "erro";
-  }
-  if (status === "cancelled") {
-    return "cancelado";
-  }
-  return "pulado";
-}
-
-function uniqueStrings(values: Array<string | undefined | null>): string[] {
-  return [...new Set(values.filter((value): value is string => !!value))];
-}
 
 function formatDateTime(value: string | undefined): string {
   if (!value) {

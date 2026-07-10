@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "lint": "eslint apps packages tools --max-warnings 0",
     "validate:example": "tsx packages/mlops-spec/src/cli.ts validate examples/support_ticket_classification",
     "validate:legal-example": "tsx packages/mlops-spec/src/cli.ts validate examples/legal_ai_classification",
     "schema:project": "tsx packages/mlops-spec/src/cli.ts schema project",
@@ -16,7 +17,12 @@
     "codegen:legal-example": "tsx packages/codegen-inference-api/src/cli.ts --project examples/legal_ai_classification --out generated/legal-classification-runtime",
     "dev:control-api": "tsx apps/control-api/src/server.ts",
     "test:control-api": "tsx --test apps/control-api/src/server.test.ts",
-    "test:worker": "python -m unittest discover apps/worker/tests",
+    "bootstrap:python": "node tools/bootstrap-python.mjs",
+    "bootstrap:python:optional": "node tools/bootstrap-python.mjs --optional",
+    "test:worker": "node tools/run-python.mjs -m unittest discover apps/worker/tests",
+    "test:ui": "tsx --test apps/mlops-ui/src/*.test.ts",
+    "test:generated": "npm run codegen:example && npm run codegen:legal-example && node tools/test-generated-runtimes.mjs",
+    "verify": "npm run lint && npm run typecheck && npm run test:ui && npm run test:worker && npm run test:control-api && npm run validate:example && npm run validate:legal-example && npm run test:generated && npm run build:mlops-ui",
     "audit:visual": "node tools/visual-audit.mjs",
     "smoke:runtime:docker": "node tools/runtime-docker-smoke.mjs",
     "smoke:orchestration": "node tools/orchestration-smoke.mjs",
@@ -27,9 +33,13 @@
     "start:desktop": "npm run build:desktop && npm --workspace @mlops-flow-studio/desktop run start"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "^24.0.0",
+    "eslint": "10.6.0",
+    "globals": "17.7.0",
     "playwright": "^1.61.1",
     "tsx": "^4.20.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "typescript-eslint": "8.63.0"
   }
 }

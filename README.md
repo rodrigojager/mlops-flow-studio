@@ -47,6 +47,10 @@ O primeiro corte implementado cobre:
 Comandos principais:
 
 ```powershell
+npm install
+npm run bootstrap:python
+npm run bootstrap:python:optional # MLflow, sentence-transformers e XGBoost
+npm run lint
 npm run typecheck
 npm run validate:example
 npm run codegen:example
@@ -57,6 +61,7 @@ npm run dev:control-api
 npm run dev:mlops-ui
 npm run dev:desktop
 npm run start:desktop
+npm run verify
 ```
 
 Launcher local no Windows:
@@ -78,6 +83,22 @@ npm run start:desktop    # produção local: build da UI + Electron
 ```
 
 O shell Electron mantém a Control API separada do runtime FastAPI gerado. Ele apenas inicia o Studio local e carrega a UI buildada ou o servidor Vite no modo desenvolvimento.
+
+## Segurança local e runtime
+
+- Os launchers geram um token aleatório e o propagam entre a UI/Electron e a Control API. Ao iniciar a API isoladamente, defina `MLOPS_STUDIO_API_TOKEN` (mínimo de 24 caracteres) e passe o mesmo valor como `VITE_CONTROL_API_TOKEN` à UI.
+- CORS aceita apenas origens loopback configuradas e `file://` autenticado; origens web externas são recusadas.
+- O runtime FastAPI exige `MLOPS_RUNTIME_API_KEY` em Bearer token, exceto em `/health`, `/dashboard` e na documentação OpenAPI. O dashboard solicita essa chave e usa CSP estrita.
+- O Compose publica somente a API em `127.0.0.1`; Postgres e Redis permanecem internos. Copie `.env.example` para `.env` e substitua todos os placeholders antes de subir um runtime fora do Studio.
+- Segredos gerados pelo Docker Runtime Manager ficam em `.mlops-studio/runtime-secrets/`, fora de Git e dos artefatos exportáveis.
+
+Validação completa e smokes reproduzíveis:
+
+```powershell
+npm run audit:visual
+npm run test:generated
+npm run smoke:runtime:docker -- --outDir generated/support-ticket-runtime --waitMs 180000
+```
 
 ## Principais recursos aproveitáveis
 

@@ -1,20 +1,8 @@
+import type { PipelineNodeType } from "@mlops-flow-studio/mlops-spec";
+
 export type ProblemType = "binary_classification" | "multiclass_classification" | "regression";
 export type BacktestWindowGranularity = "none" | "day" | "week" | "month" | "rolling_7d" | "rolling_30d";
-export type NodeType =
-  | "input"
-  | "data_source"
-  | "preprocess"
-  | "feature_transform"
-  | "embedding"
-  | "model"
-  | "python_function"
-  | "operator"
-  | "condition"
-  | "promotion_rule"
-  | "evaluation"
-  | "monitoring"
-  | "composite"
-  | "output";
+export type NodeType = PipelineNodeType;
 
 export interface ProjectSummary {
   id: string;

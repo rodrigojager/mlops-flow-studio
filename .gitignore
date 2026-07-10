@@ -21,4 +21,5 @@ generated/**
 !generated/.gitkeep
 projects/**/.mlops/tmp/
 projects/**/artifacts/
+projects/visual_audit_reimport_*/
 .mlops-studio/
